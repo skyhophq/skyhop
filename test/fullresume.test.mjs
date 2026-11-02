@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { addRelayCommit, findTranscript, MAX_TRANSCRIPT_BYTES, mergeSettings } from '../scripts/fullresume.mjs';
+import { addRelayCommit, findTranscript, MAX_TRANSCRIPT_BYTES, measureUpload, mergeSettings } from '../scripts/fullresume.mjs';
 import { RELAY_COMMIT_MARKER, scrubRelayCommit } from '../scripts/relay.mjs';
 import { makeRepo, run, tempDir, write } from './helpers.mjs';
 
@@ -39,7 +39,23 @@ test('an oversized transcript is refused', t => {
   const file = path.join(root, 'project', `${SESSION}.jsonl`);
   write(root, `project/${SESSION}.jsonl`, '');
   fs.truncateSync(file, MAX_TRANSCRIPT_BYTES + 1);
-  assert.throws(() => findTranscript(SESSION, root), /capped at 100 MB/);
+  assert.throws(() => findTranscript(SESSION, root), /too large to scan/);
+});
+
+test('the upload limit uses the compressed size, so a big transcript can fit', t => {
+  const root = tempDir(t);
+  write(root, 'session.jsonl', '{"type":"user","text":"same line again"}\n'.repeat(100000));
+  const transcript = { path: path.join(root, 'session.jsonl'), bytes: 3900000 };
+  const compressed = measureUpload(transcript, 0, 100000);
+  assert.ok(compressed < 100000, `${compressed} bytes`);
+});
+
+test('the repository counts toward the upload limit', t => {
+  const root = tempDir(t);
+  write(root, 'session.jsonl', 'x\n');
+  const transcript = { path: path.join(root, 'session.jsonl'), bytes: 2 };
+  assert.doesNotThrow(() => measureUpload(transcript, 900, 1000));
+  assert.throws(() => measureUpload(transcript, 2000000, 1000000), /capped at 100 MB/);
 });
 
 test('the hook is added to an empty settings file', () => {

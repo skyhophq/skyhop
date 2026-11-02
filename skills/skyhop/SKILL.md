@@ -23,7 +23,7 @@ Follow these steps in order.
 
 3. **Confirm.** If the arguments include `--dry-run`, show the plan and stop. If they include `--yes`, go to step 4. Otherwise show the user the plan, including the branch, what will be uploaded and the permission mode, and ask whether to go ahead. Stop if they say no.
 
-4. **Hand off.** Run the same command without `--dry-run` and with `--yes`, and allow up to 3 minutes:
+4. **Hand off.** Run the same command without `--dry-run` and with `--yes`, and allow up to 10 minutes, because a large upload takes time:
 
    ```bash
    node "${CLAUDE_PLUGIN_ROOT}/scripts/skyhop.mjs" --brief ~/.skyhop/briefs/${CLAUDE_SESSION_ID}.md --session ${CLAUDE_SESSION_ID} --yes $ARGUMENTS

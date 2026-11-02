@@ -66,15 +66,18 @@ function commandExists(name) {
   return spawnSync('sh', ['-c', `command -v ${name}`], { stdio: 'ignore' }).status === 0;
 }
 
+// A direct upload runs through the local client, so stopping the client too soon
+// would cut it off. Allows about 1 MB per second on top of the usual wait.
+export function launchTimes(uploadBytes = 0) {
+  return {
+    waitMs: Number(process.env.SKYHOP_LAUNCH_WAIT_MS ?? (uploadBytes > 0 ? 480_000 : 90_000)),
+    settleMs: Number(process.env.SKYHOP_LAUNCH_SETTLE_MS ?? 30_000 + uploadBytes / 1000),
+  };
+}
+
 // Returns once the outcome is known. A trust prompt ends the attempt, because
 // answering it belongs to the user.
-export async function launchSession({
-  dir,
-  prompt,
-  env = {},
-  waitMs = Number(process.env.SKYHOP_LAUNCH_WAIT_MS ?? 90_000),
-  settleMs = Number(process.env.SKYHOP_LAUNCH_SETTLE_MS ?? 30_000),
-}) {
+export async function launchSession({ dir, prompt, env = {}, waitMs, settleMs }) {
   const command = terminalCommand(process.platform, ['claude', '--cloud', prompt]);
   if (!command || !commandExists('script')) return { status: 'needs-terminal', reason: 'no-wrapper' };
 

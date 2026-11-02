@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import {
-  launchSession, pasteCommand, readHistory, readLaunchOutput, recordHandoff, requireSignIn, shellQuote, terminalCommand,
+  launchSession, launchTimes, pasteCommand, readHistory, readLaunchOutput, recordHandoff, requireSignIn, shellQuote, terminalCommand,
 } from '../scripts/cloud.mjs';
 import { tempDir } from './helpers.mjs';
 
@@ -83,6 +83,13 @@ test('a launch that ends with no link is reported as unconfirmed', async t => {
   const outcome = await launchSession(options);
   assert.equal(outcome.status, 'unconfirmed');
   assert.match(outcome.detail, /Setting up/);
+});
+
+test('a larger upload gets more time before the client stops', () => {
+  const small = launchTimes(0);
+  const large = launchTimes(82_000_000);
+  assert.ok(large.waitMs > small.waitMs);
+  assert.ok(large.settleMs > small.settleMs + 60_000);
 });
 
 test('the sign-in check accepts claude.ai and rejects anything else', () => {

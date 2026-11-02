@@ -74,7 +74,7 @@ Skyhop uploads the session's transcript with your code. A hook in the VM starts 
 - **A single message has a one-hour limit.** The work so far is saved if it runs out, and your next message carries on.
 - **Your full transcript is uploaded**, including everything Claude read and ran and your private file paths. It goes directly to the session and is taken out of git history on the first message, so a later push can't carry it to GitHub.
 - **It depends on an internal file format.** The transcript format can change on any Claude Code release. If the VM can't load it, the session falls back to the brief and says so.
-- **Uploads are capped at 100 MB.** Skyhop refuses larger transcripts, and long sessions use more of your plan on every message.
+- **Uploads are capped at 100 MB after compression**, counting both the transcript and your repository. Transcripts compress well, so a 180 MB session can fit. Skyhop refuses anything over the cap, and long sessions use more of your plan on every message.
 - **With no remote, or no push access, the session can't push its work back.**
 
 ## What doesn't carry over

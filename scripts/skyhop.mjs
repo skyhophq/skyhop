@@ -6,11 +6,11 @@ import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
 import { briefPrompt, loadBrief, redactPaths, resumeMessage } from './brief.mjs';
-import { launchSession, pasteCommand, readHistory, recordHandoff, requireSignIn } from './cloud.mjs';
-import { addRelayCommit, findTranscript, LARGE_TRANSCRIPT_BYTES } from './fullresume.mjs';
+import { launchSession, launchTimes, pasteCommand, readHistory, recordHandoff, requireSignIn } from './cloud.mjs';
+import { addRelayCommit, findTranscript, LARGE_TRANSCRIPT_BYTES, measureUpload } from './fullresume.mjs';
 import {
   createSnapshot, maskUrl, pendingCommitCount, pendingDiff, prepareLaunchFolder,
-  pushBranch, removeLaunchFolder, repoInfo, skyhopBranch, SkyhopError, snapshotStat,
+  pushBranch, removeLaunchFolder, repoBytes, repoInfo, skyhopBranch, SkyhopError, snapshotStat,
 } from './git.mjs';
 import { formatFinding, isSensitivePath, scanDiff, scanText } from './secrets.mjs';
 
@@ -18,6 +18,7 @@ const MODES = ['auto', 'acceptEdits', 'plan'];
 const EXIT_NEEDS_CONFIRMATION = 2;
 const EXIT_NEEDS_TERMINAL = 3;
 const STATUS_LIMIT = 10;
+const STAMP_LENGTH = '20261102-154402'.length;
 
 function readOptions(args) {
   let parsed;
@@ -57,7 +58,7 @@ function printPlan({ info, branch, snapshot, pending, options, transcript }) {
   if (fullResume) {
     lines.push(
       `  Permission: ${options.mode}, which can't be changed after the handoff`,
-      `  Upload:     the snapshot, possibly your other local branches, and the full session transcript (${(transcript.bytes / 1e6).toFixed(1)} MB), sent directly to the session`,
+      `  Upload:     the snapshot, possibly your other local branches, and the full session transcript (${(transcript.bytes / 1e6).toFixed(1)} MB, about ${(transcript.compressed / 1e6).toFixed(1)} MB compressed), sent directly to the session`,
       '              The transcript holds everything Claude read and ran, including private paths.',
     );
     if (transcript.bytes >= LARGE_TRANSCRIPT_BYTES) lines.push('  Warning:    long sessions use more of your plan on every message.');
@@ -71,6 +72,26 @@ function printPlan({ info, branch, snapshot, pending, options, transcript }) {
 
   const stat = snapshotStat(info.root, info.head, snapshot.sha);
   if (stat) console.log(`\n${stat}`);
+}
+
+// The preview and the real run are separate commands, so the preview saves its
+// branch name for the real run. Using it once means a retry gets a fresh name.
+function chooseBranch(options, info) {
+  const fresh = skyhopBranch(options.name ?? info.branch ?? 'detached');
+  const file = `${options.brief}.branch`;
+  if (options['dry-run']) {
+    fs.writeFileSync(file, fresh);
+    return fresh;
+  }
+  let saved = null;
+  try {
+    saved = fs.readFileSync(file, 'utf8').trim();
+    fs.rmSync(file);
+  } catch {
+    return fresh;
+  }
+  const withoutStamp = branch => branch.slice(0, -STAMP_LENGTH);
+  return withoutStamp(saved) === withoutStamp(fresh) ? saved : fresh;
 }
 
 function findSecrets({ info, snapshot, prompt, transcript }) {
@@ -125,12 +146,14 @@ async function handoff(options) {
 
   const transcript = fullResume ? findTranscript(options.session) : null;
   const prompt = fullResume ? resumeMessage() : briefPrompt(brief);
-  const branch = skyhopBranch(options.name ?? info.branch ?? 'detached');
+  const branch = chooseBranch(options, info);
   const snapshot = createSnapshot(info, {
     isExcluded: isSensitivePath,
     message: `Skyhop snapshot of ${info.branch ?? info.head.slice(0, 8)}`,
   });
   const pending = pendingCommitCount(info.root, snapshot.sha, info.remote) - (snapshot.created ? 1 : 0);
+  const repoSize = fullResume ? repoBytes(info.root, snapshot.sha) : 0;
+  if (transcript) transcript.compressed = measureUpload(transcript, repoSize);
 
   printPlan({ info, branch, snapshot, pending, options, transcript });
 
@@ -175,7 +198,7 @@ async function handoff(options) {
     pushed: !fullResume,
   };
   try {
-    const outcome = await launchSession({ dir, prompt, env });
+    const outcome = await launchSession({ dir, prompt, env, ...launchTimes(fullResume ? transcript.compressed + repoSize : 0) });
     if (outcome.status !== 'needs-terminal') removeLaunchFolder(info);
     return reportLaunch({ outcome, command, record });
   } catch (error) {

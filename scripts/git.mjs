@@ -127,6 +127,10 @@ export function pendingCommitCount(root, sha, remote) {
   return Number(tryGit(root, ['rev-list', '--count', ...pendingRange(sha, remote)]) ?? 0);
 }
 
+export function repoBytes(root, sha) {
+  return Number(tryGit(root, ['rev-list', '--objects', '--disk-usage', '--branches', sha]) ?? 0);
+}
+
 export function snapshotStat(root, head, sha) {
   return head === sha ? '' : git(root, ['diff', '--stat=80', head, sha]);
 }

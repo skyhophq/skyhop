@@ -211,6 +211,41 @@ test('a waiting handoff is cleaned up by the next run', t => {
   assert.equal(run(root, 'worktree', 'list').split('\n').length, 1);
 });
 
+const shownBranch = output => output.match(/Branch:\s+(skyhop\/\S+)/)[1];
+const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+test('the branch in the preview is the branch that gets pushed', t => {
+  const { skyhop, branches } = setup(t);
+  const preview = shownBranch(skyhop(['--dry-run']).output);
+  pause(1100);
+  const result = skyhop(['--yes']);
+  assert.equal(result.status, 0, result.output);
+  assert.equal(shownBranch(result.output), preview);
+  assert.equal(branches(), preview);
+});
+
+test('a preview name is used once, so a retry gets a fresh branch', t => {
+  const { skyhop, branches } = setup(t);
+  skyhop(['--dry-run']);
+  skyhop(['--yes']);
+  pause(1100);
+  skyhop(['--yes']);
+  assert.equal(branches().split('\n').length, 2);
+});
+
+test('changing --name after the preview does not reuse the old branch', t => {
+  const { skyhop, branches } = setup(t);
+  skyhop(['--dry-run', '--name', 'first']);
+  skyhop(['--yes', '--name', 'second']);
+  assert.match(branches(), /^skyhop\/second-/);
+});
+
+test('full resume shows the compressed upload size', t => {
+  const { home, skyhop } = setup(t);
+  addTranscript(home);
+  assert.match(skyhop(['--dry-run', '--full-resume']).output, /MB compressed\)/);
+});
+
 test('a failed launch keeps the brief and prints how to retry', t => {
   const { skyhop } = setup(t);
   const result = skyhop(['--yes'], { mode: 'wrong-branch' });

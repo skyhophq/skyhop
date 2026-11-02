@@ -4,11 +4,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
 import { git, SkyhopError, tryGit } from './git.mjs';
 import { RELAY_COMMIT_MARKER } from './relay.mjs';
 
-// The direct upload is capped at 100 MB, and the repository shares that limit.
-export const MAX_TRANSCRIPT_BYTES = 95 * 1024 * 1024;
+// The direct upload is capped at 100 MB after compression, shared with the repository.
+export const MAX_UPLOAD_BYTES = 95 * 1024 * 1024;
+// The secret scan holds the transcript in memory, and strings stop at about 512 MB.
+export const MAX_TRANSCRIPT_BYTES = 400 * 1024 * 1024;
 export const LARGE_TRANSCRIPT_BYTES = 10 * 1024 * 1024;
 
 const HOOK_TIMEOUT_SECONDS = 3600;
@@ -29,11 +32,24 @@ export function findTranscript(sessionId, root = projectsDir()) {
   const bytes = fs.statSync(match).size;
   if (bytes > MAX_TRANSCRIPT_BYTES) {
     throw new SkyhopError(
-      `The session transcript is ${Math.round(bytes / 1e6)} MB, and uploads are capped at 100 MB.`,
+      `The session transcript is ${Math.round(bytes / 1e6)} MB, which is too large to scan and upload.`,
       'Run /skyhop without --full-resume to use the brief handoff.',
     );
   }
   return { path: match, bytes };
+}
+
+// Git compresses what it uploads, so the raw transcript size overstates the upload.
+export function measureUpload(transcript, repoBytes, limit = MAX_UPLOAD_BYTES) {
+  const compressed = zlib.deflateSync(fs.readFileSync(transcript.path)).length;
+  if (compressed + repoBytes > limit) {
+    const mb = bytes => Math.round(bytes / 1e6);
+    throw new SkyhopError(
+      `This upload would be about ${mb(compressed + repoBytes)} MB (transcript ${mb(compressed)} MB, repository ${mb(repoBytes)} MB), and uploads are capped at 100 MB.`,
+      'Run /skyhop without --full-resume to use the brief handoff.',
+    );
+  }
+  return compressed;
 }
 
 // The outer session only repeats replies, so it can run on a small model. A
