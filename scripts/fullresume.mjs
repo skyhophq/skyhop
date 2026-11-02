@@ -1,5 +1,6 @@
 // Adds the session transcript and relay to the launch folder, for --full-resume.
-// This commit is never pushed. It reaches the VM in the direct upload.
+// With sync on, this commit goes to GitHub with the transcript encrypted, so the
+// cloud session is linked to the repo and can push. With no remote, it's uploaded.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,16 +8,19 @@ import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 import { git, SkyhopError, tryGit } from './git.mjs';
 import { RELAY_COMMIT_MARKER } from './relay.mjs';
+import { sealTranscript } from './sync.mjs';
 
-// The direct upload is capped at 100 MB after compression, shared with the repository.
+// A direct upload is capped at 100 MB after compression, shared with the repository.
 export const MAX_UPLOAD_BYTES = 95 * 1024 * 1024;
 // The secret scan holds the transcript in memory, and strings stop at about 512 MB.
 export const MAX_TRANSCRIPT_BYTES = 400 * 1024 * 1024;
 export const LARGE_TRANSCRIPT_BYTES = 10 * 1024 * 1024;
 
-const HOOK_TIMEOUT_SECONDS = 3600;
+const HOOK_TIMEOUT_SECONDS = 21600;
 const RELAY_COMMAND = 'node "$CLAUDE_PROJECT_DIR/.skyhop/relay.mjs"';
-const RELAY_SOURCE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'relay.mjs');
+const SCRIPTS = path.dirname(fileURLToPath(import.meta.url));
+// Everything the relay needs in the VM, where the plugin isn't installed.
+const VM_SCRIPTS = ['relay.mjs', 'secrets.mjs', 'sync.mjs'];
 
 function projectsDir() {
   return path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'projects');
@@ -72,14 +76,24 @@ export function mergeSettings(existing) {
   }, null, 2)}\n`;
 }
 
-export function addRelayCommit(dir, { transcript, sessionId, mode, brief }) {
+// Returns the size of the transcript copy, which is where /skyhop-back picks up.
+// The live session keeps writing to the original, so this can't be read beforehand.
+export function addRelayCommit(dir, { transcript, sessionId, mode, brief, sync, key }) {
   const skyhop = path.join(dir, '.skyhop');
   fs.mkdirSync(skyhop, { recursive: true });
-  fs.copyFileSync(transcript.path, path.join(skyhop, 'session.jsonl'));
-  fs.copyFileSync(RELAY_SOURCE, path.join(skyhop, 'relay.mjs'));
+  const bytes = fs.readFileSync(transcript.path);
+  if (sync) {
+    sealTranscript(bytes, key).forEach((part, index) => {
+      fs.writeFileSync(path.join(skyhop, `session.enc.${String(index).padStart(3, '0')}`), part);
+    });
+  } else {
+    fs.writeFileSync(path.join(skyhop, 'session.jsonl'), bytes);
+  }
+  for (const script of VM_SCRIPTS) fs.copyFileSync(path.join(SCRIPTS, script), path.join(skyhop, script));
   fs.writeFileSync(path.join(skyhop, 'session-id'), `${sessionId}\n`);
   fs.writeFileSync(path.join(skyhop, 'mode'), `${mode}\n`);
   fs.writeFileSync(path.join(skyhop, 'brief.md'), `${brief}\n`);
+  if (sync) fs.writeFileSync(path.join(skyhop, 'sync.json'), JSON.stringify({ ...sync, baseBytes: bytes.length }));
 
   const settingsFile = path.join(dir, '.claude/settings.json');
   const existing = fs.existsSync(settingsFile) ? fs.readFileSync(settingsFile, 'utf8') : null;
@@ -93,4 +107,5 @@ export function addRelayCommit(dir, { transcript, sessionId, mode, brief }) {
     '-c', `user.name=${name}`, '-c', `user.email=${email}`, '-c', 'core.hooksPath=/dev/null',
     'commit', '-q', '--no-verify', '--no-gpg-sign', '-m', `Skyhop relay files\n\n${RELAY_COMMIT_MARKER}`,
   ]);
+  return bytes.length;
 }

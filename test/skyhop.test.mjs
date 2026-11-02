@@ -240,12 +240,6 @@ test('changing --name after the preview does not reuse the old branch', t => {
   assert.match(branches(), /^skyhop\/second-/);
 });
 
-test('full resume shows the compressed upload size', t => {
-  const { home, skyhop } = setup(t);
-  addTranscript(home);
-  assert.match(skyhop(['--dry-run', '--full-resume']).output, /MB compressed\)/);
-});
-
 test('a failed launch keeps the brief and prints how to retry', t => {
   const { skyhop } = setup(t);
   const result = skyhop(['--yes'], { mode: 'wrong-branch' });
@@ -259,7 +253,7 @@ function addTranscript(home, content = '{"type":"user"}\n') {
   write(home, `.claude/projects/some-project/${SESSION}.jsonl`, content);
 }
 
-test('full resume uploads directly, pushes nothing, and leaves the repo unchanged', t => {
+test('full resume leaves the repo unchanged and pushes no skyhop/ branch', t => {
   const { root, base, home, skyhop, branches, launchFolder } = setup(t);
   dirty(root);
   addTranscript(home);
@@ -269,24 +263,30 @@ test('full resume uploads directly, pushes nothing, and leaves the repo unchange
   assert.equal(result.status, 0, result.output);
 
   assert.equal(branches(), '');
-  assert.equal(fs.readFileSync(path.join(base, 'force-bundle'), 'utf8'), '1');
+  assert.equal(fs.readFileSync(path.join(base, 'force-bundle'), 'utf8'), 'unset');
   assert.match(fs.readFileSync(path.join(base, 'prompt'), 'utf8'), /Continue with the remaining work/);
-  assert.match(result.output, /full session transcript/);
+  assert.match(result.output, /encrypted\) are pushed to a skyhop-run branch/);
   assert.match(result.output, /Permission: auto/);
 
   const seen = name => fs.readFileSync(path.join(base, name), 'utf8').trim();
   assert.equal(seen('relay-mode'), 'auto');
   assert.equal(seen('relay-session'), SESSION);
   assert.equal(seen('launch-tracked'), 'changed');
-  assert.deepEqual(fingerprint(root), before);
+  // Pushing records a remote-tracking ref, which is normal. Local refs must not change.
+  const localRefs = state => state.refs.split('\n').filter(ref => !ref.startsWith('refs/remotes/'));
+  const after = fingerprint(root);
+  assert.deepEqual(localRefs(after), localRefs(before));
+  assert.deepEqual({ ...after, refs: null }, { ...before, refs: null });
   assert.ok(!fs.existsSync(launchFolder()));
 });
 
-test('full resume works with no remote', t => {
-  const { home, skyhop } = setup(t, { remote: false });
+test('full resume with no remote uploads directly', t => {
+  const { base, home, skyhop } = setup(t, { remote: false });
   addTranscript(home);
   const result = skyhop(['--yes', '--full-resume']);
   assert.equal(result.status, 0, result.output);
+  assert.equal(fs.readFileSync(path.join(base, 'force-bundle'), 'utf8'), '1');
+  assert.match(result.output, /MB compressed\)/);
 });
 
 test('--mode sets the permission mode for full resume', t => {

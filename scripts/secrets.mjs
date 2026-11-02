@@ -33,10 +33,17 @@ function mask(value) {
   return `${value.slice(0, 4)}… (${value.length} characters)`;
 }
 
+// Signed download links carry an AWS access key ID, which is the public half of a
+// key. It sits right after one of these names, so those matches aren't findings.
+const PUBLIC_KEY_ID_FIELD = /(?:X-Amz-Credential|AWSAccessKeyId)(?:=|%3[Dd])$/;
+
 function matchesIn(text, strict) {
   const found = [];
   for (const [rule, pattern] of TOKEN_RULES) {
-    for (const match of text.matchAll(pattern)) found.push({ rule, index: match.index, value: match[0] });
+    for (const match of text.matchAll(pattern)) {
+      const isPublicKeyId = rule === 'AWS access key' && PUBLIC_KEY_ID_FIELD.test(text.slice(Math.max(0, match.index - 20), match.index));
+      if (!isPublicKeyId) found.push({ rule, index: match.index, value: match[0] });
+    }
   }
   if (!strict) {
     for (const match of text.matchAll(ASSIGNMENT_RULE)) {

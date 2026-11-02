@@ -64,6 +64,12 @@ export function maskUrl(url) {
   return url?.replace(/\/\/[^@/]+@/, '//') ?? null;
 }
 
+// A URL for the VM to reach GitHub with, without any credentials from this Mac.
+export function publicRemoteUrl(url) {
+  const ssh = url?.match(/^(?:ssh:\/\/)?git@([^:/]+)[:/](.+)$/);
+  return ssh ? `https://${ssh[1]}/${ssh[2]}` : maskUrl(url);
+}
+
 export function skyhopBranch(name, date = new Date()) {
   const clean = (name || 'session').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/\.{2,}/g, '.').replace(/^[-.]+|[-.]+$/g, '') || 'session';
   const stamp = date.toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
@@ -159,7 +165,7 @@ function launchBranch(root, dir) {
   const entry = runGit(root, ['worktree', 'list', '--porcelain']).stdout
     .split('\n\n')
     .find(block => block.startsWith(`worktree ${real}\n`));
-  return entry?.match(/^branch (refs\/heads\/skyhop\/.+)$/m)?.[1] ?? null;
+  return entry?.match(/^branch (refs\/heads\/skyhop(?:-run)?\/.+)$/m)?.[1] ?? null;
 }
 
 export function removeLaunchFolder(info) {

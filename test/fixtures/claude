@@ -9,6 +9,11 @@ if [ "$1" = "auth" ]; then
   exit 0
 fi
 
+if [ "$1" = "agents" ]; then
+  echo "${FAKE_CLAUDE_AGENTS:-[]}"
+  exit 0
+fi
+
 if [ "$1" = "--cloud" ]; then
   if ! [ -t 0 ]; then
     echo "Error: --cloud requires an interactive terminal."
@@ -20,6 +25,12 @@ if [ "$1" = "--cloud" ]; then
   git show HEAD:tracked.txt > "$FAKE_CLAUDE_DIR/launch-tracked" 2>/dev/null
   git show HEAD:.skyhop/mode > "$FAKE_CLAUDE_DIR/relay-mode" 2>/dev/null
   git show HEAD:.skyhop/session-id > "$FAKE_CLAUDE_DIR/relay-session" 2>/dev/null
+  git clone -q "$PWD" "$FAKE_CLAUDE_DIR/vm" 2>/dev/null
+  if origin=$(git remote get-url origin 2>/dev/null); then
+    git -C "$FAKE_CLAUDE_DIR/vm" remote set-url origin "$origin"
+  else
+    git -C "$FAKE_CLAUDE_DIR/vm" remote remove origin
+  fi
   case "$FAKE_CLAUDE_MODE" in
     trust)
       printf 'Quick\033[1Csafety\033[1Ccheck: Is\033[1Cthis\033[1Ca\033[1Cproject\033[1Cyou\033[1Ccreated\n'

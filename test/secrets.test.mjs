@@ -28,6 +28,20 @@ test('an Anthropic key is not also reported as an OpenAI key', () => {
   assert.deepEqual(rules, ['Anthropic API key']);
 });
 
+test('a key ID inside a signed download link is not a finding', () => {
+  const id = TOKENS['AWS access key'];
+  for (const field of ['X-Amz-Credential=', 'X-Amz-Credential%3D', 'AWSAccessKeyId=']) {
+    assert.deepEqual(scanText(`https://s3.amazonaws.com/f?${field}${id}%2F20261022`, { source: 'x', strict: true }), [], field);
+  }
+});
+
+test('the same key ID anywhere else is still a finding', () => {
+  const id = TOKENS['AWS access key'];
+  for (const text of [`aws_key=${id}`, `https://x?other=${id}`, id]) {
+    assert.equal(scanText(text, { source: 'x', strict: true }).length, 1, text);
+  }
+});
+
 test('findings never contain the secret', () => {
   const token = TOKENS['GitHub token'];
   const [finding] = scanText(token, { source: 'x' });

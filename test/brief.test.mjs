@@ -36,6 +36,14 @@ test('the first prompt carries the brief and says to act only on remaining work'
   assert.match(prompt, /do not redo those requests/);
 });
 
+test('the first prompt starts with the project', () => {
+  assert.match(briefPrompt('## Goal\nShip it.', 'my-project'), /^Project my-project\. /);
+});
+
+test('the resume message starts with the project too', () => {
+  assert.match(resumeMessage('my-project'), /^Project my-project\. /);
+});
+
 test('a prompt under the limit is unchanged', () => {
   assert.equal(fitPrompt('short', 100), 'short');
 });

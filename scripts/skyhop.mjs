@@ -5,14 +5,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
+import { bringBack, saveHandoffRecord } from './back.mjs';
 import { briefPrompt, loadBrief, redactPaths, resumeMessage } from './brief.mjs';
 import { launchSession, launchTimes, pasteCommand, readHistory, recordHandoff, requireSignIn } from './cloud.mjs';
 import { addRelayCommit, findTranscript, LARGE_TRANSCRIPT_BYTES, measureUpload } from './fullresume.mjs';
 import {
-  createSnapshot, maskUrl, pendingCommitCount, pendingDiff, prepareLaunchFolder,
+  createSnapshot, git, maskUrl, pendingCommitCount, pendingDiff, prepareLaunchFolder, publicRemoteUrl,
   pushBranch, removeLaunchFolder, repoBytes, repoInfo, skyhopBranch, SkyhopError, snapshotStat,
 } from './git.mjs';
 import { formatFinding, isSensitivePath, scanDiff, scanText } from './secrets.mjs';
+import { newKey } from './sync.mjs';
 
 const MODES = ['auto', 'acceptEdits', 'plan'];
 const EXIT_NEEDS_CONFIRMATION = 2;
@@ -35,13 +37,19 @@ function readOptions(args) {
         'full-resume': { type: 'boolean', default: false },
         'allow-secrets': { type: 'boolean', default: false },
         status: { type: 'boolean', default: false },
+        back: { type: 'boolean', default: false },
+        'no-sync': { type: 'boolean', default: false },
       },
     }).values;
   } catch (error) {
-    throw new SkyhopError(error.message, 'Flags are --name, --dry-run, --yes, --full-resume, --mode and --allow-secrets.');
+    throw new SkyhopError(error.message, 'Flags are --name, --dry-run, --yes, --full-resume, --mode, --no-sync and --allow-secrets.');
   }
   if (!MODES.includes(parsed.mode)) throw new SkyhopError(`Unknown mode: ${parsed.mode}`, `Use one of: ${MODES.join(', ')}.`);
   return parsed;
+}
+
+function syncEnabled(info, options) {
+  return Boolean(info.remoteUrl) && !options['no-sync'];
 }
 
 function printPlan({ info, branch, snapshot, pending, options, transcript }) {
@@ -57,9 +65,18 @@ function printPlan({ info, branch, snapshot, pending, options, transcript }) {
   if (snapshot.excluded.length > 0) lines.push(`  Left out:   ${snapshot.excluded.join(', ')}`);
   if (fullResume) {
     lines.push(
-      `  Permission: ${options.mode}, which can't be changed after the handoff`,
-      `  Upload:     the snapshot, possibly your other local branches, and the full session transcript (${(transcript.bytes / 1e6).toFixed(1)} MB, about ${(transcript.compressed / 1e6).toFixed(1)} MB compressed), sent directly to the session`,
-      '              The transcript holds everything Claude read and ran, including private paths.',
+      `  Permission: ${options.mode}. To change it later, send "skyhop mode acceptEdits", "skyhop mode auto" or "skyhop mode plan" in the chat`,
+      ...(syncEnabled(info, options)
+        ? [
+          `  Upload:     your code and the session transcript (${(transcript.bytes / 1e6).toFixed(1)} MB, encrypted) are pushed to a skyhop-run branch on ${info.remote}`,
+          '              The key to the transcript goes only in the first message of the cloud session.',
+          `  Sync:       after each reply, the cloud session pushes your code and the encrypted conversation to skyhop-sync branches on ${info.remote}, for /skyhop-back`,
+        ]
+        : [
+          `  Upload:     the snapshot, possibly your other local branches, and the full session transcript (${(transcript.bytes / 1e6).toFixed(1)} MB, about ${(transcript.compressed / 1e6).toFixed(1)} MB compressed), sent directly to the session`,
+          '              The transcript holds everything Claude read and ran, including private paths.',
+          '  Sync:       off, so /skyhop-back will have nothing to bring home',
+        ]),
     );
     if (transcript.bytes >= LARGE_TRANSCRIPT_BYTES) lines.push('  Warning:    long sessions use more of your plan on every message.');
   } else {
@@ -111,7 +128,7 @@ async function confirm() {
 
 function savePrompt(briefFile, prompt) {
   const file = `${briefFile}.prompt.md`;
-  fs.writeFileSync(file, prompt);
+  fs.writeFileSync(file, prompt, { mode: 0o600 });
   return file;
 }
 
@@ -145,15 +162,17 @@ async function handoff(options) {
   }
 
   const transcript = fullResume ? findTranscript(options.session) : null;
-  const prompt = fullResume ? resumeMessage() : briefPrompt(brief);
+  const project = path.basename(info.root);
+  const useSync = fullResume && syncEnabled(info, options);
+  const prompt = fullResume ? resumeMessage(project) : briefPrompt(brief, project);
   const branch = chooseBranch(options, info);
   const snapshot = createSnapshot(info, {
     isExcluded: isSensitivePath,
     message: `Skyhop snapshot of ${info.branch ?? info.head.slice(0, 8)}`,
   });
   const pending = pendingCommitCount(info.root, snapshot.sha, info.remote) - (snapshot.created ? 1 : 0);
-  const repoSize = fullResume ? repoBytes(info.root, snapshot.sha) : 0;
-  if (transcript) transcript.compressed = measureUpload(transcript, repoSize);
+  const repoSize = fullResume && !useSync ? repoBytes(info.root, snapshot.sha) : 0;
+  if (fullResume && !useSync) transcript.compressed = measureUpload(transcript, repoSize);
 
   printPlan({ info, branch, snapshot, pending, options, transcript });
 
@@ -183,11 +202,25 @@ async function handoff(options) {
     }
   }
 
-  const promptFile = savePrompt(options.brief, prompt);
   if (!fullResume) pushBranch(info, snapshot.sha, branch);
-  const dir = prepareLaunchFolder(info, snapshot.sha, branch);
-  const env = fullResume ? { CCR_FORCE_BUNDLE: '1' } : {};
-  if (fullResume) addRelayCommit(dir, { transcript, sessionId: options.session, mode: options.mode, brief });
+  const tail = branch.slice('skyhop/'.length);
+  const startBranch = useSync ? `skyhop-run/${tail}` : branch;
+  const dir = prepareLaunchFolder(info, snapshot.sha, startBranch);
+  const env = fullResume && !useSync ? { CCR_FORCE_BUNDLE: '1' } : {};
+  const key = useSync ? newKey() : null;
+  const firstMessage = key ? `${prompt}\n\n[skyhop-key:${key}]` : prompt;
+  const promptFile = savePrompt(options.brief, firstMessage);
+  if (fullResume) {
+    const sync = useSync
+      ? { chatRef: `skyhop-sync/${tail}-chat`, codeRef: `skyhop-sync/${tail}-code`, remoteUrl: publicRemoteUrl(info.remoteUrl), snapshotTree: snapshot.tree, finalBranch: branch }
+      : null;
+    const baseBytes = addRelayCommit(dir, { transcript, sessionId: options.session, mode: options.mode, brief, sync, key });
+    saveHandoffRecord({
+      sessionId: options.session, repoRoot: info.root, at: new Date().toISOString(), branch, baseBytes,
+      head: info.head, snapshotTree: snapshot.tree, sync: sync && { ...sync, key, runBranch: startBranch },
+    });
+    if (useSync) pushBranch(info, git(dir, ['rev-parse', 'HEAD']), startBranch);
+  }
 
   const command = pasteCommand(dir, promptFile, env);
   const record = {
@@ -195,10 +228,10 @@ async function handoff(options) {
     repo: redactPaths(info.root),
     branch,
     mode: fullResume ? 'full resume' : 'brief handoff',
-    pushed: !fullResume,
+    pushed: !fullResume || useSync,
   };
   try {
-    const outcome = await launchSession({ dir, prompt, env, ...launchTimes(fullResume ? transcript.compressed + repoSize : 0) });
+    const outcome = await launchSession({ dir, prompt: firstMessage, env, ...launchTimes(fullResume && !useSync ? transcript.compressed + repoSize : 0) });
     if (outcome.status !== 'needs-terminal') removeLaunchFolder(info);
     return reportLaunch({ outcome, command, record });
   } catch (error) {
@@ -225,6 +258,7 @@ function showStatus() {
 
 async function main() {
   const options = readOptions(process.argv.slice(2));
+  if (options.back) return bringBack({ session: options.session, dryRun: options['dry-run'] });
   return options.status ? showStatus() : handoff(options);
 }
 

@@ -5,11 +5,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isSensitivePath, scanDiff } from './secrets.mjs';
+import { KEY_PATTERN, openTranscript, readKey, restoreProgress, saveProgress } from './sync.mjs';
 
 export const RELAY_COMMIT_MARKER = 'skyhop-relay-commit';
 
 // A little under the hook's own timeout, so the relay can report it.
-const INNER_TIMEOUT_MS = 3_590_000;
+const INNER_TIMEOUT_MS = 21_590_000;
+const MAX_STEPS_SHOWN = 12;
+const STEP_TEXT_LIMIT = 70;
 const MAX_INNER_OUTPUT = 64 * 1024 * 1024;
 const ERROR_TEXT_LIMIT = 1500;
 const CONTEXT_LIMIT = 9000;
@@ -35,18 +39,53 @@ export function permissionArgs(mode) {
 
 // The prompt goes through stdin, so one starting with "-" is not read as a flag.
 export function innerArgs(sessionId, mode) {
-  return ['-p', '--resume', sessionId, ...permissionArgs(mode), '--output-format', 'json'];
+  return ['-p', '--resume', sessionId, ...permissionArgs(mode), '--output-format', 'stream-json', '--verbose'];
+}
+
+function describeStep({ name, input = {} }) {
+  const detail = input.description ?? input.command ?? input.file_path ?? input.pattern ?? '';
+  return `${name}${detail ? `: ${String(detail).split('\n')[0].slice(0, STEP_TEXT_LIMIT)}` : ''}`;
+}
+
+// claude -p prints one JSON event per line. The last result event is the reply, and
+// the tool calls before it stand in for the live activity the chat can't show.
+export function parseRun(stdout) {
+  const steps = [];
+  let result = null;
+  for (const line of stdout.split('\n').filter(Boolean)) {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event.type === 'result') result = event;
+    if (event.type === 'assistant') {
+      for (const block of event.message?.content ?? []) {
+        if (block.type === 'tool_use') steps.push(describeStep(block));
+      }
+    }
+  }
+  if (!result) throw new Error('the resumed session gave no result');
+  return { result, steps };
+}
+
+export function stepsNote(steps) {
+  if (steps.length === 0) return '';
+  const shown = steps.slice(0, MAX_STEPS_SHOWN).map(step => `- ${step}`);
+  const extra = steps.length - shown.length;
+  return `\n\nSteps taken:\n${shown.join('\n')}${extra > 0 ? `\n- and ${extra} more` : ''}`;
 }
 
 // The resumed session cannot show a permission prompt, so say what it was refused.
 export function deniedNote(denials, mode) {
   const tools = [...new Set((denials ?? []).map(d => d.tool_name).filter(Boolean))];
   if (tools.length === 0) return '';
-  return `\n\nBlocked in ${mode ?? 'default'} mode: ${tools.join(', ')}. This session can't ask you for approval.`;
+  return `\n\nBlocked in ${mode ?? 'default'} mode: ${tools.join(', ')}. This session can't ask you for approval. To allow more, send "skyhop mode acceptEdits" or "skyhop mode auto", then ask again.`;
 }
 
-export function formatReply(result, mode) {
-  return `${result.result ?? ''}${deniedNote(result.permission_denials, mode)}`;
+export function formatReply(result, mode, steps = []) {
+  return `${result.result ?? ''}${stepsNote(steps)}${deniedNote(result.permission_denials, mode)}`;
 }
 
 // Blocking the prompt or stopping the turn shows a warning on claude.ai. Passing the
@@ -76,6 +115,14 @@ function gitIn(root, args) {
 // The transcript reaches the VM in a commit. Taking that commit out of history
 // on the first message means a later push cannot carry it to GitHub. The files
 // stay on disk, hidden from git, so the hook keeps working.
+function readFinalBranch(root) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(root, '.skyhop/sync.json'), 'utf8')).finalBranch;
+  } catch {
+    return undefined;
+  }
+}
+
 export function scrubRelayCommit(root) {
   const done = path.join(root, '.skyhop/scrubbed');
   if (fs.existsSync(done)) return null;
@@ -92,6 +139,10 @@ export function scrubRelayCommit(root) {
     fs.mkdirSync(path.dirname(exclude), { recursive: true });
     fs.appendFileSync(exclude, `\n.skyhop/\n${settingsWereTracked ? '' : '.claude/settings.json\n'}`);
     if (settingsWereTracked) gitIn(root, ['update-index', '--skip-worktree', '.claude/settings.json']);
+
+    // The start branch on GitHub still has this commit, so later pushes need their own name.
+    const finalBranch = readFinalBranch(root);
+    if (finalBranch) gitIn(root, ['branch', '-m', finalBranch]);
   }
 
   if (gitIn(root, ['ls-files', '--error-unmatch', '.skyhop/session.jsonl']).status === 0) return SCRUB_WARNING;
@@ -116,11 +167,37 @@ function readHandoffMode(root) {
   }
 }
 
+function decryptTranscript(root, dest) {
+  const skyhop = path.join(root, '.skyhop');
+  const parts = fs.readdirSync(skyhop).filter(name => /^session\.enc\.\d+$/.test(name)).sort();
+  fs.writeFileSync(dest, openTranscript(parts.map(name => fs.readFileSync(path.join(skyhop, name))), readKey(root)));
+}
+
 function restoreTranscript(root, sessionId) {
   const dir = path.join(os.homedir(), '.claude/projects/skyhop-import');
   const dest = path.join(dir, `${sessionId}.jsonl`);
   fs.mkdirSync(dir, { recursive: true });
-  if (!fs.existsSync(dest)) fs.copyFileSync(path.join(root, '.skyhop/session.jsonl'), dest);
+  if (!fs.existsSync(dest)) {
+    const plain = path.join(root, '.skyhop/session.jsonl');
+    if (fs.existsSync(plain)) fs.copyFileSync(plain, dest);
+    else decryptTranscript(root, dest);
+    restoreProgress({ root, transcript: dest });
+  }
+  return dest;
+}
+
+// The key arrives in the first message. A rebuilt VM has lost its copy, but the chat
+// history comes back with it, so the key is read from there.
+function storeKey(root, prompt, chatTranscript) {
+  const file = path.join(root, '.skyhop/sync-key');
+  const fromPrompt = prompt.match(KEY_PATTERN)?.[1];
+  if (fromPrompt) {
+    fs.writeFileSync(file, `${fromPrompt}\n`, { mode: 0o600 });
+  } else if (!fs.existsSync(file) && chatTranscript && fs.existsSync(chatTranscript)) {
+    const found = fs.readFileSync(chatTranscript, 'utf8').match(KEY_PATTERN)?.[1];
+    if (found) fs.writeFileSync(file, `${found}\n`, { mode: 0o600 });
+  }
+  return prompt.replace(KEY_PATTERN, '').trim();
 }
 
 function runResume(root, sessionId, mode, prompt) {
@@ -134,28 +211,51 @@ function runResume(root, sessionId, mode, prompt) {
   });
 }
 
+// The chat's mode picker never reaches this hook, so the mode changes by message.
+export function modeRequest(prompt) {
+  const match = prompt.trim().match(/^skyhop mode (auto|acceptedits|plan)$/i);
+  if (!match) return null;
+  return [...HANDOFF_MODES].find(mode => mode.toLowerCase() === match[1].toLowerCase());
+}
+
+function saveQuietly(root, transcript) {
+  try {
+    return saveProgress({ root, transcript, isExcluded: isSensitivePath, scan: scanDiff });
+  } catch (error) {
+    return `Skyhop could not save this message for /skyhop-back. (${error.message})`;
+  }
+}
+
 // Returns the hook's JSON output, or null to let the outer session handle the message.
-export function handlePrompt({ prompt, hookMode, root, resume = runResume }) {
+export function handlePrompt({ prompt: rawPrompt, hookMode, root, chatTranscript, resume = runResume, save = saveQuietly }) {
   const marker = name => path.join(root, '.skyhop', name);
   if (fs.existsSync(marker('fallback'))) return null;
 
+  const prompt = storeKey(root, rawPrompt, chatTranscript);
   const warning = scrubRelayCommit(root);
+  const requestedMode = modeRequest(prompt);
+  if (requestedMode) {
+    fs.writeFileSync(marker('mode'), `${requestedMode}\n`);
+    return relayOutput(`Permission mode is now ${requestedMode}.`, long => saveLongReply(root, long));
+  }
+
   const mode = resolveMode(hookMode, readHandoffMode(root));
   const isFirstMessage = !fs.existsSync(marker('resumed'));
 
   let run;
   let reply;
+  let transcript;
   try {
     const sessionId = fs.readFileSync(marker('session-id'), 'utf8').trim();
-    restoreTranscript(root, sessionId);
+    transcript = restoreTranscript(root, sessionId);
     run = resume(root, sessionId, mode, prompt);
     if (run.error?.code === 'ETIMEDOUT') {
       reply = 'The resumed session ran out of time on this message. Its work so far is saved, so send a message to carry on.';
     } else {
-      const result = JSON.parse(run.stdout);
+      const { result, steps } = parseRun(run.stdout);
       reply = result.is_error
         ? `The resumed session reported an error: ${String(result.result).slice(0, ERROR_TEXT_LIMIT)}`
-        : formatReply(result, mode);
+        : formatReply(result, mode, steps);
       fs.writeFileSync(marker('resumed'), '');
     }
   } catch (error) {
@@ -167,8 +267,9 @@ export function handlePrompt({ prompt, hookMode, root, resume = runResume }) {
     reply = `Skyhop relay failed (exit ${run?.status ?? 'none'}): ${detail}`;
   }
 
+  const saveWarning = transcript ? save(root, transcript) : null;
   const debug = fs.existsSync(marker('debug'));
-  const parts = [debug ? `[skyhop-relay hook=${hookMode} used=${mode}]` : null, warning, reply].filter(Boolean);
+  const parts = [debug ? `[skyhop-relay hook=${hookMode} used=${mode}]` : null, warning, reply, saveWarning].filter(Boolean);
   return relayOutput(parts.join('\n\n'), long => saveLongReply(root, long));
 }
 
@@ -178,10 +279,10 @@ async function main() {
 
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
-  const { prompt, permission_mode: hookMode } = JSON.parse(input);
+  const { prompt, permission_mode: hookMode, transcript_path: chatTranscript } = JSON.parse(input);
   const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 
-  const output = handlePrompt({ prompt, hookMode, root });
+  const output = handlePrompt({ prompt, hookMode, root, chatTranscript });
   if (output) console.log(JSON.stringify(output));
 }
 

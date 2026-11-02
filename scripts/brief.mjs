@@ -43,10 +43,12 @@ export function fitPrompt(prompt, limit = MAX_PROMPT_BYTES) {
   throw new SkyhopError(`The brief is too long, at ${Buffer.byteLength(prompt)} bytes.`, `Shorten it to under ${limit} bytes, then run /skyhop again.`);
 }
 
-export function briefPrompt(brief) {
-  return fitPrompt(`${BRIEF_INTRO}\n\n${brief}`);
+// Starting with the project name steers the title Claude generates for the session.
+export function briefPrompt(brief, project) {
+  const intro = project ? `Project ${project}. ${BRIEF_INTRO}` : BRIEF_INTRO;
+  return fitPrompt(`${intro}\n\n${brief}`);
 }
 
-export function resumeMessage() {
-  return RESUME_MESSAGE;
+export function resumeMessage(project) {
+  return project ? `Project ${project}. ${RESUME_MESSAGE}` : RESUME_MESSAGE;
 }

@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { deniedNote, formatReply, handlePrompt, innerArgs, permissionArgs, relayOutput, resolveMode } from '../scripts/relay.mjs';
+import {
+  deniedNote, formatReply, handlePrompt, innerArgs, modeRequest, parseRun, permissionArgs, relayOutput, resolveMode, stepsNote,
+} from '../scripts/relay.mjs';
+import { newKey, sealTranscript } from '../scripts/sync.mjs';
 import { makeRepo, write } from './helpers.mjs';
 
 function vm(t, { mode = 'auto', debug = false } = {}) {
@@ -21,7 +24,7 @@ function vm(t, { mode = 'auto', debug = false } = {}) {
   return { root, base, calls, resumeWith, context, exists: name => fs.existsSync(path.join(root, '.skyhop', name)) };
 }
 
-const ok = text => ({ status: 0, stdout: JSON.stringify({ result: text }) });
+const ok = text => ({ status: 0, stdout: JSON.stringify({ type: 'result', result: text }) });
 
 test('a message reaches the resumed session with the handoff mode', t => {
   const { root, base, calls, resumeWith, context } = vm(t);
@@ -38,6 +41,94 @@ test('the transcript is restored once, so later messages keep their history', t 
   fs.writeFileSync(restored, 'grown by the resumed session\n');
   handlePrompt({ prompt: 'two', hookMode: 'default', root, resume: resumeWith(ok('b')) });
   assert.equal(fs.readFileSync(restored, 'utf8'), 'grown by the resumed session\n');
+});
+
+test('reads the reply and tool steps from the event stream', () => {
+  const stdout = [
+    JSON.stringify({ type: 'system', subtype: 'init' }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'working' }, { type: 'tool_use', name: 'Bash', input: { description: 'Run the tests', command: 'npm test' } }] } }),
+    'not json',
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: 'src/app.js' } }] } }),
+    JSON.stringify({ type: 'result', result: 'All done' }),
+  ].join('\n');
+  const { result, steps } = parseRun(stdout);
+  assert.equal(result.result, 'All done');
+  assert.deepEqual(steps, ['Bash: Run the tests', 'Edit: src/app.js']);
+});
+
+test('a run with no result event counts as a failure', () => {
+  assert.throws(() => parseRun('{"type":"system"}'), /no result/);
+});
+
+test('long step lists are shortened', () => {
+  const note = stepsNote(Array.from({ length: 15 }, (_, i) => `step ${i}`));
+  assert.match(note, /step 11\n- and 3 more/);
+  assert.doesNotMatch(note, /step 12/);
+  assert.equal(stepsNote([]), '');
+});
+
+test('the steps taken appear in the reply', t => {
+  const { root, resumeWith, context } = vm(t);
+  const events = [
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: 'a.txt' } }] } }),
+    JSON.stringify({ type: 'result', result: 'Wrote it' }),
+  ].join('\n');
+  const output = handlePrompt({ prompt: 'x', hookMode: 'default', root, resume: resumeWith({ status: 0, stdout: events }) });
+  assert.match(context(output), /Wrote it\n\nSteps taken:\n- Write: a\.txt/);
+});
+
+test('recognizes a mode change sent in the chat', () => {
+  assert.equal(modeRequest('skyhop mode auto'), 'auto');
+  assert.equal(modeRequest('  Skyhop Mode acceptedits '), 'acceptEdits');
+  assert.equal(modeRequest('skyhop mode plan'), 'plan');
+  assert.equal(modeRequest('skyhop mode bypassPermissions'), null);
+  assert.equal(modeRequest('what is skyhop mode auto about?'), null);
+});
+
+test('a mode change is applied to later messages without reaching the session', t => {
+  const { root, calls, resumeWith, context } = vm(t);
+  const output = handlePrompt({ prompt: 'skyhop mode acceptEdits', hookMode: 'default', root, resume: resumeWith(ok('no')) });
+  assert.match(context(output), /Permission mode is now acceptEdits/);
+  assert.equal(calls.length, 0);
+  handlePrompt({ prompt: 'do it', hookMode: 'default', root, resume: resumeWith(ok('done')) });
+  assert.equal(calls[0].usedMode, 'acceptEdits');
+});
+
+test('a blocked tool tells the user how to allow it', () => {
+  assert.match(deniedNote([{ tool_name: 'Bash' }], 'plan'), /send "skyhop mode acceptEdits"/);
+});
+
+test('the key in the first message is stored and never reaches the resumed session', t => {
+  const { root, calls, resumeWith } = vm(t);
+  handlePrompt({ prompt: 'Carry on.\n\n[skyhop-key:abc123==]', hookMode: 'default', root, resume: resumeWith(ok('done')) });
+  assert.equal(calls[0].prompt, 'Carry on.');
+  assert.equal(fs.readFileSync(path.join(root, '.skyhop/sync-key'), 'utf8').trim(), 'abc123==');
+  assert.equal(fs.statSync(path.join(root, '.skyhop/sync-key')).mode & 0o777, 0o600);
+});
+
+test('a rebuilt VM finds its key again in the chat history', t => {
+  const { root, base, resumeWith } = vm(t);
+  const chat = path.join(base, 'chat.jsonl');
+  fs.writeFileSync(chat, '{"message":"Carry on. [skyhop-key:recovered==]"}\n');
+  handlePrompt({ prompt: 'next', hookMode: 'default', root, chatTranscript: chat, resume: resumeWith(ok('done')) });
+  assert.equal(fs.readFileSync(path.join(root, '.skyhop/sync-key'), 'utf8').trim(), 'recovered==');
+});
+
+test('an encrypted transcript is opened in the VM', t => {
+  const { root, base, resumeWith } = vm(t);
+  const key = newKey();
+  fs.rmSync(path.join(root, '.skyhop/session.jsonl'));
+  sealTranscript(Buffer.from('{"line":"secret history"}\n'), key, 20).forEach((part, index) => {
+    fs.writeFileSync(path.join(root, '.skyhop', `session.enc.${String(index).padStart(3, '0')}`), part);
+  });
+  handlePrompt({ prompt: `go [skyhop-key:${key}]`, hookMode: 'default', root, resume: resumeWith(ok('done')) });
+  assert.equal(fs.readFileSync(path.join(base, '.claude/projects/skyhop-import/abc.jsonl'), 'utf8'), '{"line":"secret history"}\n');
+});
+
+test('a save warning is added to the reply, and the reply still arrives', t => {
+  const { root, resumeWith, context } = vm(t);
+  const output = handlePrompt({ prompt: 'x', hookMode: 'default', root, resume: resumeWith(ok('the reply')), save: () => 'could not save' });
+  assert.match(context(output), /the reply[\s\S]*could not save/);
 });
 
 test('debug mode tags the reply', t => {
@@ -86,7 +177,7 @@ test('a timeout does not end the relay, even on the first message', t => {
 
 test('an error from the model is shown and does not end the relay', t => {
   const { root, resumeWith, context, exists } = vm(t);
-  const failed = { status: 1, stdout: JSON.stringify({ is_error: true, result: 'rate limited' }) };
+  const failed = { status: 1, stdout: JSON.stringify({ type: 'result', is_error: true, result: 'rate limited' }) };
   const output = handlePrompt({ prompt: 'x', hookMode: 'default', root, resume: resumeWith(failed) });
   assert.match(context(output), /rate limited/);
   assert.ok(!exists('fallback'));
@@ -156,7 +247,7 @@ test('never passes bypassPermissions or an unknown mode', () => {
 
 test('keeps the prompt out of the arguments', () => {
   assert.deepEqual(innerArgs('abc', 'auto'), [
-    '-p', '--resume', 'abc', '--permission-mode', 'auto', '--output-format', 'json',
+    '-p', '--resume', 'abc', '--permission-mode', 'auto', '--output-format', 'stream-json', '--verbose',
   ]);
 });
 
