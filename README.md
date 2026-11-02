@@ -75,7 +75,7 @@ Skyhop pushes your code and the session's transcript to a `skyhop-run/...` branc
 - **Replies are generated twice**, once by the resumed session and once by the chat Claude repeating them. The chat Claude runs on Haiku to keep this cheap, and it could change the wording slightly.
 - **The mode picker in the chat has no effect.** Send `skyhop mode auto`, `skyhop mode acceptEdits` or `skyhop mode plan` as a message instead.
 - **The resumed session can't ask you for approval.** If it needs a tool its mode doesn't allow, the reply says what was blocked and how to allow it.
-- **Long single messages are unproven.** Skyhop allows a message up to six hours, but tests have only confirmed messages of a few minutes, and a task of about 20 minutes gave no result within 30 minutes. Break big jobs into several messages.
+- **Long single messages are unproven.** Skyhop allows a message up to six hours, but tests have only confirmed messages of a few minutes, and a task of about 20 minutes gave no result within 40 minutes. Break big jobs into several messages.
 - **It depends on an internal file format.** The transcript format can change on any Claude Code release. If the VM can't load it, the session falls back to the brief and says so.
 - **Long sessions use more of your plan on every message.**
 - **The first message of the cloud session shows the decryption key.** It only opens this handoff's transcript, which `/skyhop-back` deletes from GitHub. Don't share that session publicly before then.
