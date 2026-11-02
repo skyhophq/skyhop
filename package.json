@@ -1,0 +1,14 @@
+{
+  "name": "skyhop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hand off a local terminal session to a Claude Code cloud session.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

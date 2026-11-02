@@ -1,0 +1,210 @@
+#!/usr/bin/env node
+// Main entry point for /skyhop and /skyhop-status.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createInterface } from 'node:readline/promises';
+import { parseArgs } from 'node:util';
+import { briefPrompt, loadBrief, redactPaths, resumeMessage } from './brief.mjs';
+import { launchSession, pasteCommand, readHistory, recordHandoff, requireSignIn } from './cloud.mjs';
+import { addRelayCommit, findTranscript, LARGE_TRANSCRIPT_BYTES } from './fullresume.mjs';
+import {
+  createSnapshot, maskUrl, pendingCommitCount, pendingDiff, prepareLaunchFolder,
+  pushBranch, repoInfo, skyhopBranch, SkyhopError, snapshotStat,
+} from './git.mjs';
+import { formatFinding, isSensitivePath, scanDiff, scanText } from './secrets.mjs';
+
+const MODES = ['auto', 'acceptEdits', 'plan'];
+const EXIT_NEEDS_CONFIRMATION = 2;
+const EXIT_NEEDS_TERMINAL = 3;
+const STATUS_LIMIT = 10;
+
+function readOptions(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        brief: { type: 'string' },
+        session: { type: 'string' },
+        name: { type: 'string' },
+        mode: { type: 'string', default: 'auto' },
+        'dry-run': { type: 'boolean', default: false },
+        yes: { type: 'boolean', default: false },
+        'full-resume': { type: 'boolean', default: false },
+        'allow-secrets': { type: 'boolean', default: false },
+        status: { type: 'boolean', default: false },
+      },
+    }).values;
+  } catch (error) {
+    throw new SkyhopError(error.message, 'Flags are --name, --dry-run, --yes, --full-resume, --mode and --allow-secrets.');
+  }
+  if (!MODES.includes(parsed.mode)) throw new SkyhopError(`Unknown mode: ${parsed.mode}`, `Use one of: ${MODES.join(', ')}.`);
+  return parsed;
+}
+
+function printPlan({ info, branch, snapshot, pending, options, transcript }) {
+  const fullResume = options['full-resume'];
+  const lines = [
+    'Skyhop plan',
+    `  Mode:       ${fullResume ? 'full resume' : 'brief handoff'}`,
+    `  Branch:     ${branch}${fullResume ? ' (not pushed)' : ''}`,
+    `  Remote:     ${info.remote ? `${info.remote} (${maskUrl(info.remoteUrl)})` : 'none'}`,
+    `  Changes:    ${snapshot.created ? `${snapshot.files.length} uncommitted file(s)` : 'no uncommitted changes'}`,
+    `  Unpushed:   ${pending} commit(s)`,
+  ];
+  if (snapshot.excluded.length > 0) lines.push(`  Left out:   ${snapshot.excluded.join(', ')}`);
+  if (fullResume) {
+    lines.push(
+      `  Permission: ${options.mode}, which can't be changed after the handoff`,
+      `  Upload:     the snapshot branch and the full session transcript (${(transcript.bytes / 1e6).toFixed(1)} MB), sent directly to the session`,
+      '              The transcript holds everything Claude read and ran, including private paths.',
+    );
+    if (transcript.bytes >= LARGE_TRANSCRIPT_BYTES) lines.push('  Warning:    long sessions use more of your plan on every message.');
+  } else {
+    lines.push(`  Upload:     the branch is pushed to ${info.remote}, and the brief is the first prompt`);
+  }
+  console.log(lines.join('\n'));
+
+  const stat = snapshotStat(info.root, info.head, snapshot.sha);
+  if (stat) console.log(`\n${stat}`);
+}
+
+function findSecrets({ info, snapshot, prompt, transcript }) {
+  return [
+    ...scanDiff(pendingDiff(info.root, snapshot.sha, info.remote)),
+    ...scanText(prompt, { source: 'brief' }),
+    ...(transcript ? scanText(fs.readFileSync(transcript.path, 'utf8'), { source: 'session transcript', strict: true }) : []),
+  ];
+}
+
+async function confirm() {
+  const reader = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await reader.question('\nHand off now? [y/N] ');
+  reader.close();
+  return /^y(es)?$/i.test(answer.trim());
+}
+
+function savePrompt(briefFile, prompt) {
+  const file = `${briefFile}.prompt.md`;
+  fs.writeFileSync(file, prompt);
+  return file;
+}
+
+function reportLaunch({ outcome, command, record }) {
+  if (outcome.status === 'started') {
+    recordHandoff({ ...record, status: 'started', sessionId: outcome.sessionId, url: outcome.url });
+    console.log(`\nCloud session started on ${record.branch}.\nSession ID: ${outcome.sessionId}\nLink: ${outcome.url}`);
+    return 0;
+  }
+  if (outcome.status === 'needs-terminal') {
+    recordHandoff({ ...record, status: 'waiting for terminal' });
+    const why = outcome.reason === 'trust'
+      ? 'Claude Code needs you to trust the Skyhop launch folder. This happens once per repository.'
+      : 'Claude Code needs a real terminal to start this session.';
+    console.log(`\n${why}\nRun this in your own terminal${outcome.reason === 'trust' ? ', and choose "Yes, I trust this folder"' : ''}:\n\n${command}`);
+    return EXIT_NEEDS_TERMINAL;
+  }
+  recordHandoff({ ...record, status: 'unconfirmed' });
+  console.log(`\nThe launch finished without showing a session link. Check https://claude.ai/code for a new session on ${record.branch}.\nIf there is none, run this in your own terminal:\n\n${command}`);
+  if (outcome.detail) console.log(`\nLast output:\n${outcome.detail}`);
+  return 0;
+}
+
+async function handoff(options) {
+  const fullResume = options['full-resume'];
+  const info = repoInfo(process.cwd());
+  const brief = loadBrief(options.brief);
+  requireSignIn();
+  if (!info.remote && !fullResume) {
+    throw new SkyhopError('This repository has no remote, so there is nowhere to push the branch.', 'Add a GitHub remote, or use --full-resume, which uploads directly. A session with no remote cannot push its work back.');
+  }
+
+  const transcript = fullResume ? findTranscript(options.session) : null;
+  const prompt = fullResume ? resumeMessage() : briefPrompt(brief);
+  const branch = skyhopBranch(options.name ?? info.branch ?? 'detached');
+  const snapshot = createSnapshot(info, {
+    isExcluded: isSensitivePath,
+    message: `Skyhop snapshot of ${info.branch ?? info.head.slice(0, 8)}`,
+  });
+  const pending = pendingCommitCount(info.root, snapshot.sha, info.remote) - (snapshot.created ? 1 : 0);
+
+  printPlan({ info, branch, snapshot, pending, options, transcript });
+
+  const findings = findSecrets({ info, snapshot, prompt: fullResume ? `${prompt}\n${brief}` : prompt, transcript });
+  if (findings.length > 0) {
+    console.log(`\nLikely secrets found:\n${findings.map(finding => `  ${formatFinding(finding)}`).join('\n')}`);
+    if (!options['allow-secrets']) {
+      throw new SkyhopError('Stopped because of the likely secrets above. Nothing left this machine.', 'Remove them and run /skyhop again. If they are false alarms, add --allow-secrets.');
+    }
+    console.log('Continuing because --allow-secrets was set.');
+  } else {
+    console.log('\nSecret scan: nothing found.');
+  }
+
+  if (options['dry-run']) {
+    console.log(`\nDry run: nothing was pushed or started.\n\n--- First prompt ---\n${prompt}`);
+    return 0;
+  }
+  if (!options.yes) {
+    if (!process.stdin.isTTY) {
+      console.log('\nConfirmation needed. Run again with --yes once the user has agreed.');
+      return EXIT_NEEDS_CONFIRMATION;
+    }
+    if (!await confirm()) {
+      console.log('Stopped. Nothing was pushed or started.');
+      return 0;
+    }
+  }
+
+  const promptFile = savePrompt(options.brief, prompt);
+  if (!fullResume) pushBranch(info, snapshot.sha, branch);
+  const dir = prepareLaunchFolder(info, snapshot.sha, branch);
+  const env = fullResume ? { CCR_FORCE_BUNDLE: '1' } : {};
+  if (fullResume) addRelayCommit(dir, { transcript, sessionId: options.session, mode: options.mode, brief });
+
+  const command = pasteCommand(dir, promptFile, env);
+  const record = {
+    at: new Date().toISOString(),
+    repo: redactPaths(info.root),
+    branch,
+    mode: fullResume ? 'full resume' : 'brief handoff',
+    pushed: !fullResume,
+  };
+  try {
+    const outcome = await launchSession({ dir, prompt, env });
+    return reportLaunch({ outcome, command, record });
+  } catch (error) {
+    if (error instanceof SkyhopError) {
+      recordHandoff({ ...record, status: `failed: ${error.message}` });
+      error.hint = `${error.hint ?? ''}\nThe brief is kept at ${options.brief}. To retry, run this in your own terminal:\n\n${command}`.trim();
+    }
+    throw error;
+  }
+}
+
+function showStatus() {
+  const history = readHistory().slice(-STATUS_LIMIT).reverse();
+  if (history.length === 0) {
+    console.log('No handoffs yet.');
+    return 0;
+  }
+  console.log(`Last ${history.length} handoff(s), newest first. Open a link to see live progress.\n`);
+  for (const entry of history) {
+    console.log(`${entry.at}  ${entry.mode}  ${entry.status}\n  ${entry.repo}  ${entry.branch}\n  ${entry.url ?? 'no link recorded'}\n`);
+  }
+  return 0;
+}
+
+async function main() {
+  const options = readOptions(process.argv.slice(2));
+  return options.status ? showStatus() : handoff(options);
+}
+
+try {
+  process.exitCode = await main();
+} catch (error) {
+  if (!(error instanceof SkyhopError)) throw error;
+  console.error(`\nSkyhop: ${error.message}${error.hint ? `\n${error.hint}` : ''}`);
+  process.exitCode = 1;
+}

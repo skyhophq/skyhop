@@ -1,0 +1,12 @@
+{
+  "name": "skyhop",
+  "displayName": "Skyhop",
+  "version": "0.1.0",
+  "description": "Hand off a local terminal session to a Claude Code cloud session, with its code state and conversation, so you can close your laptop and carry on from claude.ai/code.",
+  "author": {
+    "name": "arya232006"
+  },
+  "repository": "https://github.com/arya232006/skyhop",
+  "license": "MIT",
+  "keywords": ["handoff", "cloud", "session", "resume"]
+}

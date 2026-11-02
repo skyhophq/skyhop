@@ -1,0 +1,37 @@
+#!/bin/sh
+# Stand-in for the claude CLI, so tests never reach the real cloud.
+if [ "$1" = "auth" ]; then
+  if [ "$FAKE_CLAUDE_MODE" = "signed-out" ]; then
+    echo '{"loggedIn":false}'
+  else
+    echo '{"loggedIn":true,"authMethod":"claude.ai"}'
+  fi
+  exit 0
+fi
+
+if [ "$1" = "--cloud" ]; then
+  if ! [ -t 0 ]; then
+    echo "Error: --cloud requires an interactive terminal."
+    exit 1
+  fi
+  printf '%s' "$2" > "$FAKE_CLAUDE_DIR/prompt"
+  git rev-parse --abbrev-ref HEAD > "$FAKE_CLAUDE_DIR/branch"
+  printf '%s' "${CCR_FORCE_BUNDLE:-unset}" > "$FAKE_CLAUDE_DIR/force-bundle"
+  case "$FAKE_CLAUDE_MODE" in
+    trust)
+      printf 'Quick\033[1Csafety\033[1Ccheck: Is\033[1Cthis\033[1Ca\033[1Cproject\033[1Cyou\033[1Ccreated\n'
+      printf 'Yes,\033[1CI\033[1Ctrust\033[1Cthis\033[1Cfolder\n'
+      ;;
+    wrong-branch)
+      echo "Branch skyhop/x is not on GitHub. Starting from the default branch."
+      ;;
+    no-link)
+      echo "Setting up"
+      exit 0
+      ;;
+    *)
+      echo "View: https://claude.ai/code/session_01FakeSessionForTests"
+      ;;
+  esac
+  sleep 30
+fi

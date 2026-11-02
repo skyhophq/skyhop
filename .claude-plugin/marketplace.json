@@ -1,0 +1,14 @@
+{
+  "name": "skyhop",
+  "description": "Skyhop hands off a local terminal session to a Claude Code cloud session.",
+  "owner": {
+    "name": "arya232006"
+  },
+  "plugins": [
+    {
+      "name": "skyhop",
+      "source": "./",
+      "description": "Hand off a local terminal session to a Claude Code cloud session."
+    }
+  ]
+}
