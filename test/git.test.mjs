@@ -4,7 +4,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import {
   createSnapshot, launchDir, maskUrl, pendingCommitCount, pendingDiff, prepareLaunchFolder,
-  pushBranch, repoInfo, skyhopBranch,
+  pushBranch, removeLaunchFolder, repoInfo, skyhopBranch,
 } from '../scripts/git.mjs';
 import { isSensitivePath } from '../scripts/secrets.mjs';
 import { dirty, fingerprint, makeRepo, run, tempDir, write } from './helpers.mjs';
@@ -120,7 +120,7 @@ test('a rejected push explains itself', t => {
   });
 });
 
-test('the launch folder holds only the snapshot branch and leaves no ref behind', t => {
+test('the launch folder is a worktree on the snapshot branch', t => {
   const { root, base } = makeRepo(t);
   process.env.HOME = base;
   dirty(root);
@@ -132,28 +132,53 @@ test('the launch folder holds only the snapshot branch and leaves no ref behind'
   assert.equal(dir, launchDir(root));
   assert.equal(run(dir, 'rev-parse', 'HEAD'), sha);
   assert.equal(run(dir, 'symbolic-ref', '--short', 'HEAD'), 'skyhop/one');
-  assert.equal(run(dir, 'remote', 'get-url', 'origin'), info.remoteUrl);
   assert.equal(fs.readFileSync(path.join(dir, 'new-file.txt'), 'utf8'), 'untracked\n');
-
-  const after = fingerprint(root);
-  assert.equal(after.refs, before.refs);
-  assert.equal(after.index, before.index);
+  assert.equal(run(root, 'symbolic-ref', '--short', 'HEAD'), before.branch);
+  assert.equal(fingerprint(root).index, before.index);
 });
 
-test('reusing the launch folder keeps the path and drops the old branch and leftovers', t => {
+test('removing the launch folder leaves the repo exactly as it was', t => {
+  const { root, base } = makeRepo(t);
+  process.env.HOME = base;
+  dirty(root);
+  const before = fingerprint(root);
+  const info = repoInfo(root);
+  const dir = prepareLaunchFolder(info, snapshot(info).sha, 'skyhop/one');
+  removeLaunchFolder(info);
+  assert.ok(!fs.existsSync(dir));
+  assert.deepEqual(fingerprint(root), before);
+  assert.equal(run(root, 'worktree', 'list').split('\n').length, 1);
+});
+
+test('removing never deletes a branch that is not a Skyhop branch', t => {
   const { root, base } = makeRepo(t);
   process.env.HOME = base;
   const info = repoInfo(root);
-  const dir = prepareLaunchFolder(info, info.head, 'skyhop/one');
-  write(dir, 'stray.txt', 'left behind\n');
+  fs.mkdirSync(path.dirname(launchDir(root)), { recursive: true });
+  run(root, 'worktree', 'add', '-q', '-b', 'my-work', launchDir(root));
+  removeLaunchFolder(info);
+  assert.equal(run(root, 'rev-parse', '--verify', 'my-work'), info.head);
+});
 
-  write(root, 'tracked.txt', 'changed\n');
-  const { sha } = snapshot(info);
-  const second = prepareLaunchFolder(info, sha, 'skyhop/two');
+test('a leftover launch folder does not block the next handoff', t => {
+  const { root, base } = makeRepo(t);
+  process.env.HOME = base;
+  const info = repoInfo(root);
+  prepareLaunchFolder(info, info.head, 'skyhop/one');
+  const dir = prepareLaunchFolder(info, info.head, 'skyhop/two');
+  assert.equal(run(dir, 'symbolic-ref', '--short', 'HEAD'), 'skyhop/two');
+  assert.equal(run(root, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/skyhop'), 'skyhop/two');
+});
 
-  assert.equal(second, dir);
-  assert.equal(run(dir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads'), 'skyhop/two');
-  assert.ok(!fs.existsSync(path.join(dir, 'stray.txt')));
+test('pending changes cover every local branch', t => {
+  const { root } = makeRepo(t);
+  run(root, 'checkout', '-q', '-b', 'other');
+  write(root, 'other.txt', 'line on another branch\n');
+  run(root, 'add', '-A');
+  run(root, 'commit', '-q', '-m', 'other');
+  run(root, 'checkout', '-q', 'main');
+  const info = repoInfo(root);
+  assert.match(pendingDiff(root, info.head, info.remote), /\+line on another branch/);
 });
 
 test('branch names are safe and carry a timestamp', () => {

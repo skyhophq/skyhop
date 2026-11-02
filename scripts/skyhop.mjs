@@ -10,7 +10,7 @@ import { launchSession, pasteCommand, readHistory, recordHandoff, requireSignIn 
 import { addRelayCommit, findTranscript, LARGE_TRANSCRIPT_BYTES } from './fullresume.mjs';
 import {
   createSnapshot, maskUrl, pendingCommitCount, pendingDiff, prepareLaunchFolder,
-  pushBranch, repoInfo, skyhopBranch, SkyhopError, snapshotStat,
+  pushBranch, removeLaunchFolder, repoInfo, skyhopBranch, SkyhopError, snapshotStat,
 } from './git.mjs';
 import { formatFinding, isSensitivePath, scanDiff, scanText } from './secrets.mjs';
 
@@ -57,12 +57,15 @@ function printPlan({ info, branch, snapshot, pending, options, transcript }) {
   if (fullResume) {
     lines.push(
       `  Permission: ${options.mode}, which can't be changed after the handoff`,
-      `  Upload:     the snapshot branch and the full session transcript (${(transcript.bytes / 1e6).toFixed(1)} MB), sent directly to the session`,
+      `  Upload:     the snapshot, possibly your other local branches, and the full session transcript (${(transcript.bytes / 1e6).toFixed(1)} MB), sent directly to the session`,
       '              The transcript holds everything Claude read and ran, including private paths.',
     );
     if (transcript.bytes >= LARGE_TRANSCRIPT_BYTES) lines.push('  Warning:    long sessions use more of your plan on every message.');
   } else {
-    lines.push(`  Upload:     the branch is pushed to ${info.remote}, and the brief is the first prompt`);
+    lines.push(
+      `  Upload:     the branch is pushed to ${info.remote}, and the brief is the first prompt`,
+      "              If the Claude GitHub App isn't on this repo, Claude Code uploads the repo directly instead, possibly with your other local branches.",
+    );
   }
   console.log(lines.join('\n'));
 
@@ -100,7 +103,7 @@ function reportLaunch({ outcome, command, record }) {
   if (outcome.status === 'needs-terminal') {
     recordHandoff({ ...record, status: 'waiting for terminal' });
     const why = outcome.reason === 'trust'
-      ? 'Claude Code needs you to trust the Skyhop launch folder. This happens once per repository.'
+      ? "Claude Code needs you to trust this repository, because you haven't trusted it yet."
       : 'Claude Code needs a real terminal to start this session.';
     console.log(`\n${why}\nRun this in your own terminal${outcome.reason === 'trust' ? ', and choose "Yes, I trust this folder"' : ''}:\n\n${command}`);
     return EXIT_NEEDS_TERMINAL;
@@ -173,6 +176,7 @@ async function handoff(options) {
   };
   try {
     const outcome = await launchSession({ dir, prompt, env });
+    if (outcome.status !== 'needs-terminal') removeLaunchFolder(info);
     return reportLaunch({ outcome, command, record });
   } catch (error) {
     if (error instanceof SkyhopError) {

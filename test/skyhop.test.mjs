@@ -59,14 +59,18 @@ test('a full run pushes the branch, starts the session and leaves the repo uncha
   assert.equal(run(bare, 'show', `${branch}:tracked.txt`), 'changed');
   assert.deepEqual(run(bare, 'ls-tree', '-r', '--name-only', branch).split('\n').filter(f => f === '.env' || f === 'ignored.txt'), []);
 
+  // Pushing records a remote-tracking ref, which is normal. Local refs must not change.
+  const localRefs = state => state.refs.split('\n').filter(ref => !ref.startsWith('refs/remotes/'));
   const after = fingerprint(root);
+  assert.deepEqual(localRefs(after), localRefs(before));
   assert.deepEqual({ ...after, refs: null }, { ...before, refs: null });
+  assert.equal(run(root, 'worktree', 'list').split('\n').length, 1);
+  assert.ok(!fs.existsSync(launchFolder()));
 
   assert.match(result.output, /session_01FakeSessionForTests/);
   assert.equal(fs.readFileSync(path.join(base, 'branch'), 'utf8').trim(), branch);
   assert.match(fs.readFileSync(path.join(base, 'prompt'), 'utf8'), /## Goal\nShip it\./);
   assert.equal(fs.readFileSync(path.join(base, 'force-bundle'), 'utf8'), 'unset');
-  assert.equal(run(launchFolder(), 'symbolic-ref', '--short', 'HEAD'), branch);
 
   const [record] = JSON.parse(fs.readFileSync(path.join(home, '.skyhop/history.json'), 'utf8'));
   assert.equal(record.branch, branch);
@@ -184,6 +188,29 @@ test('a trust prompt prints a command for the user and records the handoff', t =
   assert.equal(record.status, 'waiting for terminal');
 });
 
+test('a secret on another local branch stops a handoff, because uploads carry every branch', t => {
+  const { root, skyhop, branches } = setup(t);
+  run(root, 'checkout', '-q', '-b', 'other');
+  write(root, 'config.js', `const key = "${FAKE_TOKEN}";\n`);
+  run(root, 'add', '-A');
+  run(root, 'commit', '-q', '-m', 'on another branch');
+  run(root, 'checkout', '-q', 'main');
+  const result = skyhop(['--yes']);
+  assert.equal(result.status, 1);
+  assert.match(result.output, /config\.js/);
+  assert.equal(branches(), '');
+});
+
+test('a waiting handoff is cleaned up by the next run', t => {
+  const { root, skyhop } = setup(t);
+  assert.equal(skyhop(['--yes', '--name', 'first'], { mode: 'trust' }).status, 3);
+  assert.match(run(root, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/skyhop'), /skyhop\/first-/);
+
+  assert.equal(skyhop(['--yes', '--name', 'second']).status, 0);
+  assert.equal(run(root, 'for-each-ref', 'refs/heads/skyhop'), '');
+  assert.equal(run(root, 'worktree', 'list').split('\n').length, 1);
+});
+
 test('a failed launch keeps the brief and prints how to retry', t => {
   const { skyhop } = setup(t);
   const result = skyhop(['--yes'], { mode: 'wrong-branch' });
@@ -212,12 +239,12 @@ test('full resume uploads directly, pushes nothing, and leaves the repo unchange
   assert.match(result.output, /full session transcript/);
   assert.match(result.output, /Permission: auto/);
 
-  const dir = launchFolder();
-  assert.equal(run(dir, 'show', 'HEAD:.skyhop/mode'), 'auto');
-  assert.equal(run(dir, 'show', 'HEAD:.skyhop/session-id'), SESSION);
-  assert.equal(run(dir, 'show', 'HEAD:tracked.txt'), 'changed');
-  assert.deepEqual({ ...fingerprint(root), refs: null }, { ...before, refs: null });
-  assert.equal(run(root, 'for-each-ref', 'refs/skyhop'), '');
+  const seen = name => fs.readFileSync(path.join(base, name), 'utf8').trim();
+  assert.equal(seen('relay-mode'), 'auto');
+  assert.equal(seen('relay-session'), SESSION);
+  assert.equal(seen('launch-tracked'), 'changed');
+  assert.deepEqual(fingerprint(root), before);
+  assert.ok(!fs.existsSync(launchFolder()));
 });
 
 test('full resume works with no remote', t => {
@@ -228,11 +255,11 @@ test('full resume works with no remote', t => {
 });
 
 test('--mode sets the permission mode for full resume', t => {
-  const { home, skyhop, launchFolder } = setup(t);
+  const { base, home, skyhop } = setup(t);
   addTranscript(home);
   const result = skyhop(['--yes', '--full-resume', '--mode', 'acceptEdits']);
   assert.equal(result.status, 0, result.output);
-  assert.equal(run(launchFolder(), 'show', 'HEAD:.skyhop/mode'), 'acceptEdits');
+  assert.equal(fs.readFileSync(path.join(base, 'relay-mode'), 'utf8').trim(), 'acceptEdits');
 });
 
 test('an unknown mode or flag is refused', t => {

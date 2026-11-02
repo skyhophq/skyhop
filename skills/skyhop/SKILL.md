@@ -31,4 +31,4 @@ Follow these steps in order.
 
 5. **Report** in one or two lines: the branch and the session link.
 
-   If the command printed a command for the user's own terminal, give them that command exactly, in a code block. Tell them to run it in a separate terminal window, not with `!` here, because it needs a real terminal.
+   This usually starts by itself. If it printed a command for the user's own terminal instead, give them that command exactly, in a code block. Tell them to run it in a separate terminal window, not with `!` here, because it needs a real terminal.

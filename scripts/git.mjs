@@ -109,11 +109,13 @@ export function createSnapshot(info, { isExcluded = () => false, message }) {
   }
 }
 
+// Claude Code's docs say a direct upload includes every branch, so all of them count.
 function pendingRange(sha, remote) {
-  return remote ? [sha, '--not', `--remotes=${remote}`] : [sha];
+  const refs = [sha, '--branches', '--tags'];
+  return remote ? [...refs, '--not', `--remotes=${remote}`] : refs;
 }
 
-// Every commit the handoff would carry that the remote does not already have.
+// Every commit the handoff could carry that the remote does not already have.
 export function pendingDiff(root, sha, remote) {
   return runGit(root, [
     'log', '-p', '--unified=0', '--no-color', '--no-ext-diff', '--no-textconv',
@@ -148,33 +150,30 @@ export function launchDir(root, home = os.homedir()) {
   return path.join(home, '.skyhop', 'launch', `${name}-${id}`);
 }
 
-// Keeps one stable clone per repo that holds only the snapshot branch. --cloud runs
-// from here, so it sees that branch, any upload holds only that branch, and the
-// workspace trust prompt only appears the first time.
-export function prepareLaunchFolder(info, sha, branch) {
+function launchBranch(root, dir) {
+  const real = fs.existsSync(dir) ? fs.realpathSync(dir) : dir;
+  const entry = runGit(root, ['worktree', 'list', '--porcelain']).stdout
+    .split('\n\n')
+    .find(block => block.startsWith(`worktree ${real}\n`));
+  return entry?.match(/^branch (refs\/heads\/skyhop\/.+)$/m)?.[1] ?? null;
+}
+
+export function removeLaunchFolder(info) {
   const dir = launchDir(info.root);
-  fs.mkdirSync(dir, { recursive: true });
-  if (!fs.existsSync(path.join(dir, '.git'))) git(dir, ['init', '-q', '-b', 'skyhop-launch']);
+  const branch = launchBranch(info.root, dir);
+  tryGit(info.root, ['worktree', 'remove', '--force', dir]);
+  fs.rmSync(dir, { recursive: true, force: true });
+  git(info.root, ['worktree', 'prune']);
+  if (branch) tryGit(info.root, ['update-ref', '-d', branch]);
+}
 
-  const origin = tryGit(dir, ['remote', 'get-url', 'origin']);
-  if (info.remoteUrl && !origin) git(dir, ['remote', 'add', 'origin', info.remoteUrl]);
-  else if (info.remoteUrl && origin !== info.remoteUrl) git(dir, ['remote', 'set-url', 'origin', info.remoteUrl]);
-  else if (!info.remoteUrl && origin) git(dir, ['remote', 'remove', 'origin']);
-
-  // A commit with no ref cannot be fetched, so it gets a short-lived hidden ref.
-  const tempRef = `refs/skyhop/launch-${process.pid}-${Date.now()}`;
-  git(info.root, ['update-ref', tempRef, sha]);
-  try {
-    git(dir, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--force', info.root, `+${tempRef}:refs/heads/${branch}`]);
-  } finally {
-    git(info.root, ['update-ref', '-d', tempRef]);
-  }
-
-  git(dir, [...NO_HOOKS, 'checkout', '-q', '-f', branch]);
-  git(dir, ['clean', '-q', '-f', '-d', '-x']);
-  const others = git(dir, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']).split('\n').filter(name => name && name !== branch);
-  if (others.length > 0) git(dir, ['branch', '-q', '-D', ...others]);
-  git(dir, ['reflog', 'expire', '--expire=now', '--all']);
-  git(dir, ['gc', '-q', '--prune=now']);
+// --cloud uses the current branch, so it runs from a linked worktree on the
+// snapshot branch. A worktree shares its main repo's workspace trust, so the trust
+// prompt doesn't appear, and the user's own checkout is never switched.
+export function prepareLaunchFolder(info, sha, branch) {
+  removeLaunchFolder(info);
+  const dir = launchDir(info.root);
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  git(info.root, [...NO_HOOKS, 'worktree', 'add', '-q', '-b', branch, dir, sha]);
   return dir;
 }

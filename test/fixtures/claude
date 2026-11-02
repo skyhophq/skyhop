@@ -17,6 +17,9 @@ if [ "$1" = "--cloud" ]; then
   printf '%s' "$2" > "$FAKE_CLAUDE_DIR/prompt"
   git rev-parse --abbrev-ref HEAD > "$FAKE_CLAUDE_DIR/branch"
   printf '%s' "${CCR_FORCE_BUNDLE:-unset}" > "$FAKE_CLAUDE_DIR/force-bundle"
+  git show HEAD:tracked.txt > "$FAKE_CLAUDE_DIR/launch-tracked" 2>/dev/null
+  git show HEAD:.skyhop/mode > "$FAKE_CLAUDE_DIR/relay-mode" 2>/dev/null
+  git show HEAD:.skyhop/session-id > "$FAKE_CLAUDE_DIR/relay-session" 2>/dev/null
   case "$FAKE_CLAUDE_MODE" in
     trust)
       printf 'Quick\033[1Csafety\033[1Ccheck: Is\033[1Cthis\033[1Ca\033[1Cproject\033[1Cyou\033[1Ccreated\n'

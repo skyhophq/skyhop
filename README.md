@@ -43,7 +43,7 @@ Skyhop needs Node.js 20 or later, git, and a claude.ai sign-in on a plan that in
 | `--mode M` | Sets the permission mode for full resume: `auto` (default), `acceptEdits` or `plan` |
 | `--allow-secrets` | Continues even though the secret scan found something |
 
-**The first handoff from each repository needs one extra step.** Claude Code asks you to trust Skyhop's launch folder, and only you can answer that. Skyhop prints a command to run in your own terminal. Choose **Yes, I trust this folder**, and later handoffs from that repository start without it.
+**Handoffs start by themselves** from any repository you've already trusted in Claude Code. Skyhop runs `--cloud` from a temporary git worktree, which shares your repository's trust, and removes the worktree afterward. If you haven't trusted the repository, Skyhop prints a command to run in your own terminal, and you choose **Yes, I trust this folder**.
 
 ## The two modes
 
@@ -92,19 +92,21 @@ In either mode, the cloud VM won't have:
 - **Your checkout stays exactly as it was.** Your branch, working tree and index are unchanged. Skyhop builds the snapshot with a temporary index and never switches branches.
 - **Skyhop never force-pushes.** It only creates a new `skyhop/...` branch.
 - **Gitignored and `.env`-style files are left out.** This also covers keys, certificates and files like `.npmrc`, and the plan lists what was left out.
-- **Secrets stop the handoff.** Skyhop scans everything your remote doesn't already have, including unpushed commits, plus the brief and any transcript. If it finds a likely secret, nothing leaves your machine. The scanner matches known patterns, so it can miss things.
+- **Secrets stop the handoff.** Skyhop scans everything your remote doesn't already have, including unpushed commits on every local branch, plus the brief and any transcript. If it finds a likely secret, nothing leaves your machine. The scanner matches known patterns, so it can miss things.
 - **You confirm first.** Skyhop shows the branch, remote, changes and upload before anything leaves your machine, unless you pass `--yes`.
 - **Private paths are removed from the brief.** The full-resume transcript can't be edited, so the confirmation warns you about it.
-- **Skyhop never answers the trust prompt for you.**
+- **Skyhop never answers the trust prompt or changes your trust settings.** It relies on the trust a worktree shares with its repository.
 - **A failed handoff tells you how to retry.** The brief is kept in `~/.skyhop/briefs/`.
 
-Skyhop keeps its files in `~/.skyhop/`: briefs, a history of handoffs, and one launch folder per repository.
+Skyhop keeps its files in `~/.skyhop/`: briefs, a history of handoffs, and a temporary launch worktree. The worktree and its local `skyhop/...` branch are removed after the launch. If a handoff is waiting on you, they stay until your next handoff from that repository.
 
 ## Known limitations
 
 - `/skyhop-status` lists links from this machine. It can't show live progress, so open the link for that.
 - Pushed `skyhop/...` branches stay on your remote until you delete them.
-- If the Claude GitHub App isn't installed on your repository, `--cloud` uploads the snapshot branch directly instead of cloning it. The session can then push back only if your GitHub connection has access.
+- Direct uploads may include your other local branches. Claude Code's docs say they do, although another branch wasn't visible in the VM when this was tested, so Skyhop scans all of them.
+- If the Claude GitHub App isn't installed on your repository, `--cloud` uploads the repository directly instead of cloning. The session can then push back only if your GitHub connection has access.
+- Full resume leaves unreachable copies of the transcript in your repository's `.git` folder until git cleans them up. They are never pushed.
 - If Skyhop can't take its commit out of git history in the VM, it warns you in the chat. Don't push that branch.
 
 ## Development
