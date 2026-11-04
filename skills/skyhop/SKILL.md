@@ -1,7 +1,7 @@
 ---
 name: skyhop
-description: Hand off this session to a Claude Code cloud session, with its code and conversation, so the work carries on after the laptop closes.
-argument-hint: "[--name X] [--dry-run] [--yes] [--full-resume] [--mode auto|acceptEdits|plan] [--allow-secrets]"
+description: Move this session to a Claude Code cloud session, with its code and full history, so the work carries on after the laptop closes. /skyhop-back brings it home.
+argument-hint: "[--summary] [--name X] [--dry-run] [--yes] [--mode auto|acceptEdits|plan] [--no-sync] [--allow-secrets]"
 disable-model-invocation: true
 ---
 

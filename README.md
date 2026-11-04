@@ -27,11 +27,11 @@ Skyhop needs Node.js 20 or later, git, and a claude.ai sign-in on a plan that in
 ## Usage
 
 ```text
-/skyhop                      Hand off with a brief and recent conversation
-/skyhop --dry-run            Show the plan and first prompt, and do nothing else
-/skyhop --full-resume        Resume the real session inside the cloud VM
+/skyhop                      Move this session to the cloud, with its full history
+/skyhop --summary            Start a new cloud session from a brief instead
+/skyhop --dry-run            Show the plan and first message, and do nothing else
 /skyhop --name login-fix     Choose the branch name
-/skyhop-back                 Bring a full-resume session home
+/skyhop-back                 Bring the session home
 /skyhop-back --dry-run       Show what would come back, and change nothing
 /skyhop-status               List past handoffs and their links
 ```
@@ -41,7 +41,7 @@ Skyhop needs Node.js 20 or later, git, and a claude.ai sign-in on a plan that in
 | `--name X` | Names the branch `skyhop/X-<timestamp>`. Defaults to your current branch name |
 | `--dry-run` | Pushes nothing, starts nothing, and prints the plan and first prompt |
 | `--yes` | Skips the confirmation |
-| `--full-resume` | Uses full resume instead of the brief handoff |
+| `--summary` | Starts a new cloud session from a brief instead of moving this one. Before version 0.3.0 this was the default, and `--full-resume` chose the other mode. `--full-resume` still works |
 | `--mode M` | Sets the starting permission mode for full resume: `auto` (default), `acceptEdits` or `plan` |
 | `--no-sync` | Full resume only. Pushes nothing to GitHub and uploads directly instead, so `/skyhop-back` has nothing to bring home |
 | `--allow-secrets` | Continues even though the secret scan found something |
@@ -50,7 +50,7 @@ Skyhop needs Node.js 20 or later, git, and a claude.ai sign-in on a plan that in
 
 ## The two modes
 
-| | Brief handoff (`/skyhop`) | Full resume (`/skyhop --full-resume`) |
+| | Summary handoff (`/skyhop --summary`) | Full resume (`/skyhop`, the default) |
 | --- | --- | --- |
 | **Conversation** | A brief plus recent turns, written by Claude | The real session transcript, resumed inside the VM |
 | **Chat experience** | A normal cloud session with live tool activity | Normal-looking replies, but no live tool activity |
@@ -59,7 +59,7 @@ Skyhop needs Node.js 20 or later, git, and a claude.ai sign-in on a plan that in
 | **Usage** | Normal | Each reply is generated twice |
 | **Coming home** | `claude --teleport` brings a separate copy | `/skyhop-back` puts it back in your original session |
 
-### Brief handoff
+### Summary handoff
 
 Skyhop snapshots your work to a new branch and starts a cloud session on it. The first prompt holds a brief: your goal, current state, decisions, remaining work, gotchas, and the last several exchanges.
 
@@ -69,7 +69,7 @@ Skyhop snapshots your work to a new branch and starts a cloud session on it. The
 
 Skyhop pushes your code and the session's transcript to a `skyhop-run/...` branch, with the transcript encrypted. The key goes only in the first message of the cloud session, never through GitHub. A hook in the VM decrypts the transcript and starts a second Claude Code process with `--resume`, which loads the real conversation. That process does the work, and the chat Claude repeats each reply.
 
-**This is a copy of your session running inside a relay. It is not your original session, and Skyhop can't load a local session into Anthropic's own cloud session.** The limits are:
+**Your session continues in the cloud, from a copy of its transcript.** The cloud chat you type into is a new chat that passes your messages to it, because Anthropic's cloud can't adopt a local session. That chat can't show your old messages, so its first message is a recap of where you left off. The session itself has the full history, and `/skyhop-back` puts everything back into your original session. The limits are:
 
 - **No live tool activity.** You see the final reply to each message, followed by a **Steps taken** list of what it did.
 - **Replies are generated twice**, once by the resumed session and once by the chat Claude repeating them. The chat Claude runs on Haiku to keep this cheap, and it could change the wording slightly.
@@ -100,7 +100,7 @@ Skyhop won't overwrite anything to do this:
 
 The `skyhop-run` and `skyhop-sync` branches are deleted from your remote afterward.
 
-A brief handoff is a separate session, so `/skyhop-back` tells you how to bring it down with `claude --teleport` instead.
+A summary handoff is a separate session, so `/skyhop-back` tells you how to bring it down with `claude --teleport` instead.
 
 ## What doesn't carry over
 
@@ -129,7 +129,7 @@ Skyhop keeps its files in `~/.skyhop/`: briefs, a history of handoffs, the keys 
 ## Known limitations
 
 - `/skyhop-status` lists links from this machine. It can't show live progress, so open the link for that.
-- Brief handoff branches, and full-resume branches you never bring home, stay on your remote until you delete them.
+- Summary handoff branches, and full-resume branches you never bring home, stay on your remote until you delete them.
 - If the Claude GitHub App isn't installed on your repository, `--cloud` uploads it directly instead of cloning, and that session can't push. Full resume still works, but each reply warns that nothing is being saved for `/skyhop-back`.
 - The desktop app groups cloud sessions by their GitHub repo, so a handoff from a repo you have open in the app appears under that project. A session uploaded directly has no repo link and appears under **Cloud**. That happens with `--no-sync`, with no remote, or when the Claude GitHub App isn't set up on the repo.
 - If Skyhop can't take its commit out of git history in the VM, it warns you in the chat. Don't push that branch.

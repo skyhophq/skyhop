@@ -286,9 +286,9 @@ test('with no full resume to bring back, it explains', t => {
 
 test('after a brief handoff it explains how to get that session', t => {
   const { skyhop, home } = setup(t);
-  assert.equal(skyhop(['--brief', path.join(home, '.skyhop/briefs/brief.md'), '--yes']).status, 0);
+  assert.equal(skyhop(['--brief', path.join(home, '.skyhop/briefs/brief.md'), '--yes', '--summary']).status, 0);
   const output = skyhop(['--back']).output;
-  assert.match(output, /brief handoff/);
+  assert.match(output, /summary handoff/);
   assert.match(output, /claude --teleport session_01FakeSessionForTests/);
   assert.match(output, /git fetch origin skyhop\//);
 });

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { briefPrompt, fitPrompt, loadBrief, MAX_PROMPT_BYTES, redactPaths, resumeMessage } from '../scripts/brief.mjs';
+import { briefPrompt, fitPrompt, loadBrief, MAX_PROMPT_BYTES, redactPaths, resumeMessage, resumePrompt } from '../scripts/brief.mjs';
 import { tempDir } from './helpers.mjs';
 
 test('private paths are redacted', () => {
@@ -42,6 +42,19 @@ test('the first prompt starts with the project', () => {
 
 test('the resume message starts with the project too', () => {
   assert.match(resumeMessage('my-project'), /^Project my-project\. /);
+});
+
+test('the full-resume prompt carries the recap between its markers', () => {
+  const prompt = resumePrompt('my-project', '## Goal\nShip it.');
+  assert.match(prompt, /^Project my-project\. Skyhop has moved you/);
+  assert.match(prompt, /--- Where we left off[^\n]*\n\n## Goal\nShip it\.\n\n--- End of recap ---$/);
+});
+
+test('a long recap is trimmed from its oldest turns and keeps its end marker', () => {
+  const turns = Array.from({ length: 3000 }, (_, i) => `turn ${i}`).join('\n');
+  const prompt = resumePrompt('p', `## Goal\nShip it.\n\n## Recent conversation\n${turns}`);
+  assert.ok(Buffer.byteLength(prompt) <= MAX_PROMPT_BYTES);
+  assert.match(prompt, /turn 2999\n\n--- End of recap ---$/);
 });
 
 test('a prompt under the limit is unchanged', () => {

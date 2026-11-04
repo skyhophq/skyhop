@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
 import { bringBack, saveHandoffRecord } from './back.mjs';
-import { briefPrompt, loadBrief, redactPaths, resumeMessage } from './brief.mjs';
+import { briefPrompt, loadBrief, redactPaths, resumePrompt } from './brief.mjs';
 import { launchSession, launchTimes, pasteCommand, readHistory, recordHandoff, requireSignIn } from './cloud.mjs';
 import { addRelayCommit, findTranscript, LARGE_TRANSCRIPT_BYTES, measureUpload } from './fullresume.mjs';
 import {
@@ -34,6 +34,7 @@ function readOptions(args) {
         mode: { type: 'string', default: 'auto' },
         'dry-run': { type: 'boolean', default: false },
         yes: { type: 'boolean', default: false },
+        summary: { type: 'boolean', default: false },
         'full-resume': { type: 'boolean', default: false },
         'allow-secrets': { type: 'boolean', default: false },
         status: { type: 'boolean', default: false },
@@ -42,9 +43,12 @@ function readOptions(args) {
       },
     }).values;
   } catch (error) {
-    throw new SkyhopError(error.message, 'Flags are --name, --dry-run, --yes, --full-resume, --mode, --no-sync and --allow-secrets.');
+    throw new SkyhopError(error.message, 'Flags are --summary, --name, --dry-run, --yes, --mode, --no-sync and --allow-secrets.');
   }
   if (!MODES.includes(parsed.mode)) throw new SkyhopError(`Unknown mode: ${parsed.mode}`, `Use one of: ${MODES.join(', ')}.`);
+  if (parsed.summary && parsed['full-resume']) throw new SkyhopError('--summary and --full-resume ask for different handoffs.', 'Use one of them.');
+  // Full resume is the default. --full-resume still works, for older habits.
+  parsed['full-resume'] = !parsed.summary;
   return parsed;
 }
 
@@ -56,7 +60,7 @@ function printPlan({ info, branch, snapshot, pending, options, transcript }) {
   const fullResume = options['full-resume'];
   const lines = [
     'Skyhop plan',
-    `  Mode:       ${fullResume ? 'full resume' : 'brief handoff'}`,
+    `  Mode:       ${fullResume ? 'full resume, the same session continues in the cloud' : 'summary handoff, a new session starts from a brief'}`,
     `  Branch:     ${branch}${fullResume ? ' (not pushed)' : ''}`,
     `  Remote:     ${info.remote ? `${info.remote} (${maskUrl(info.remoteUrl)})` : 'none'}`,
     `  Changes:    ${snapshot.created ? `${snapshot.files.length} uncommitted file(s)` : 'no uncommitted changes'}`,
@@ -158,13 +162,13 @@ async function handoff(options) {
   const brief = loadBrief(options.brief);
   requireSignIn();
   if (!info.remote && !fullResume) {
-    throw new SkyhopError('This repository has no remote, so there is nowhere to push the branch.', 'Add a GitHub remote, or use --full-resume, which uploads directly. A session with no remote cannot push its work back.');
+    throw new SkyhopError('This repository has no remote, so there is nowhere to push the branch.', 'Add a GitHub remote, or drop --summary to use full resume, which uploads directly. A session with no remote cannot push its work back.');
   }
 
   const transcript = fullResume ? findTranscript(options.session) : null;
   const project = path.basename(info.root);
   const useSync = fullResume && syncEnabled(info, options);
-  const prompt = fullResume ? resumeMessage(project) : briefPrompt(brief, project);
+  const prompt = fullResume ? resumePrompt(project, brief) : briefPrompt(brief, project);
   const branch = chooseBranch(options, info);
   const snapshot = createSnapshot(info, {
     isExcluded: isSensitivePath,
@@ -176,7 +180,7 @@ async function handoff(options) {
 
   printPlan({ info, branch, snapshot, pending, options, transcript });
 
-  const findings = findSecrets({ info, snapshot, prompt: fullResume ? `${prompt}\n${brief}` : prompt, transcript });
+  const findings = findSecrets({ info, snapshot, prompt, transcript });
   if (findings.length > 0) {
     console.log(`\nLikely secrets found:\n${findings.map(finding => `  ${formatFinding(finding)}`).join('\n')}`);
     if (!options['allow-secrets']) {
@@ -227,7 +231,7 @@ async function handoff(options) {
     at: new Date().toISOString(),
     repo: redactPaths(info.root),
     branch,
-    mode: fullResume ? 'full resume' : 'brief handoff',
+    mode: fullResume ? 'full resume' : 'summary handoff',
     pushed: !fullResume || useSync,
   };
   try {

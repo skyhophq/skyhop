@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import {
-  deniedNote, formatReply, handlePrompt, innerArgs, modeRequest, parseRun, permissionArgs, relayOutput, resolveMode, stepsNote,
+  deniedNote, formatReply, handlePrompt, stripRecap, innerArgs, modeRequest, parseRun, permissionArgs, relayOutput, resolveMode, stepsNote,
 } from '../scripts/relay.mjs';
 import { newKey, sealTranscript } from '../scripts/sync.mjs';
 import { makeRepo, write } from './helpers.mjs';
@@ -123,6 +123,18 @@ test('an encrypted transcript is opened in the VM', t => {
   });
   handlePrompt({ prompt: `go [skyhop-key:${key}]`, hookMode: 'default', root, resume: resumeWith(ok('done')) });
   assert.equal(fs.readFileSync(path.join(base, '.claude/projects/skyhop-import/abc.jsonl'), 'utf8'), '{"line":"secret history"}\n');
+});
+
+test('the recap is for the user and never reaches the resumed session', t => {
+  const { root, calls, resumeWith } = vm(t);
+  const first = 'Carry on.\n\n--- Where we left off (a recap) ---\n\n## Goal\nShip it.\n\n--- End of recap ---\n\n[skyhop-key:abc==]';
+  handlePrompt({ prompt: first, hookMode: 'default', root, resume: resumeWith(ok('done')) });
+  assert.equal(calls[0].prompt, 'Carry on.');
+});
+
+test('a message with no recap is passed on unchanged', () => {
+  assert.equal(stripRecap('just a message'), 'just a message');
+  assert.equal(stripRecap('--- End of recap --- then --- Where we left off'), '--- End of recap --- then --- Where we left off');
 });
 
 test('a save warning is added to the reply, and the reply still arrives', t => {

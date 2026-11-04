@@ -142,9 +142,9 @@ function bringCode(info, record, sha, dryRun) {
 }
 
 function briefHandoffHelp(info, home) {
-  const entry = readHistory(home).filter(item => item.repo === redactPaths(info.root) && item.mode === 'brief handoff').pop();
+  const entry = readHistory(home).filter(item => item.repo === redactPaths(info.root) && ['summary handoff', 'brief handoff'].includes(item.mode)).pop();
   if (!entry) return null;
-  console.log(`Your last handoff from this repository was a brief handoff, on ${entry.branch}.`);
+  console.log(`Your last handoff from this repository was a summary handoff (--summary), on ${entry.branch}.`);
   console.log('Its conversation is a separate cloud session, so bring it down with Claude Code itself:\n');
   console.log(`git fetch ${info.remote} ${entry.branch}\nclaude --teleport${entry.sessionId ? ` ${entry.sessionId}` : ''}`);
   return 0;

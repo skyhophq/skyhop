@@ -19,8 +19,11 @@ function setup(t, options) {
   const home = path.join(repo.base, 'home');
   const briefFile = path.join(home, '.skyhop/briefs/brief.md');
   write(home, '.skyhop/briefs/brief.md', '## Goal\nShip it.\n\n## Remaining work\n1. Finish.\n');
+  // Most tests here cover the summary handoff, so they ask for it unless they say otherwise.
   const skyhop = (args, { mode = '' } = {}) => {
-    const result = spawnSync('node', [SCRIPT, '--brief', briefFile, '--session', SESSION, ...args], {
+    const full = ['--full-resume', '--status', '--default'].some(flag => args.includes(flag));
+    const flags = full ? args.filter(flag => flag !== '--default') : ['--summary', ...args];
+    const result = spawnSync('node', [SCRIPT, '--brief', briefFile, '--session', SESSION, ...flags], {
       cwd: repo.root,
       encoding: 'utf8',
       env: {
@@ -149,12 +152,12 @@ test('without a terminal or --yes it asks for confirmation and pushes nothing', 
   assert.equal(branches(), '');
 });
 
-test('no remote is a clear error for the brief handoff', t => {
+test('no remote is a clear error for the summary handoff', t => {
   const { skyhop } = setup(t, { remote: false });
   const result = skyhop(['--yes']);
   assert.equal(result.status, 1);
   assert.match(result.output, /no remote/);
-  assert.match(result.output, /--full-resume/);
+  assert.match(result.output, /drop --summary/);
 });
 
 test('being signed out is a clear error', t => {
@@ -295,6 +298,29 @@ test('--mode sets the permission mode for full resume', t => {
   const result = skyhop(['--yes', '--full-resume', '--mode', 'acceptEdits']);
   assert.equal(result.status, 0, result.output);
   assert.equal(fs.readFileSync(path.join(base, 'relay-mode'), 'utf8').trim(), 'acceptEdits');
+});
+
+test('full resume is the default', t => {
+  const { home, skyhop, branches } = setup(t);
+  addTranscript(home);
+  const result = skyhop(['--default', '--yes']);
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /Mode:\s+full resume/);
+  assert.equal(branches(), '');
+});
+
+test('--summary and --full-resume together are refused', t => {
+  const { skyhop } = setup(t);
+  assert.match(skyhop(['--full-resume', '--yes', '--summary']).output, /ask for different handoffs/);
+});
+
+test('the cloud chat starts with a recap of where you left off', t => {
+  const { base, home, skyhop } = setup(t);
+  addTranscript(home);
+  assert.equal(skyhop(['--full-resume', '--yes']).status, 0);
+  const first = fs.readFileSync(path.join(base, 'prompt'), 'utf8');
+  assert.match(first, /--- Where we left off[\s\S]*## Goal\nShip it\.[\s\S]*--- End of recap ---/);
+  assert.match(first, /\[skyhop-key:[^\]]+\]$/);
 });
 
 test('an unknown mode or flag is refused', t => {

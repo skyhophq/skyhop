@@ -52,3 +52,12 @@ export function briefPrompt(brief, project) {
 export function resumeMessage(project) {
   return project ? `Project ${project}. ${RESUME_MESSAGE}` : RESUME_MESSAGE;
 }
+
+export const RECAP_START = '--- Where we left off (a recap for you to read. The session already has its full history) ---';
+export const RECAP_END = '--- End of recap ---';
+
+// The first message of the cloud chat: the instruction for the resumed session,
+// then a recap the user can read, since the chat can't show the old messages.
+export function resumePrompt(project, brief) {
+  return fitPrompt(`${resumeMessage(project)}\n\n${RECAP_START}\n\n${brief}\n\n${RECAP_END}`);
+}

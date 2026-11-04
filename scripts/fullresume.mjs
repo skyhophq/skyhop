@@ -27,17 +27,17 @@ function projectsDir() {
 }
 
 export function findTranscript(sessionId, root = projectsDir()) {
-  if (!sessionId) throw new SkyhopError('--full-resume needs the session ID.', 'Run this through /skyhop, which passes it.');
+  if (!sessionId) throw new SkyhopError('A full resume needs the session ID.', 'Run this through /skyhop, which passes it.');
   const name = `${sessionId}.jsonl`;
   const folders = fs.existsSync(root) ? fs.readdirSync(root) : [];
   const match = folders.map(folder => path.join(root, folder, name)).find(file => fs.existsSync(file));
-  if (!match) throw new SkyhopError(`The transcript for session ${sessionId} was not found.`, 'Run /skyhop without --full-resume to use the brief handoff.');
+  if (!match) throw new SkyhopError(`The transcript for session ${sessionId} was not found.`, 'Run /skyhop --summary to hand off with a summary instead.');
 
   const bytes = fs.statSync(match).size;
   if (bytes > MAX_TRANSCRIPT_BYTES) {
     throw new SkyhopError(
       `The session transcript is ${Math.round(bytes / 1e6)} MB, which is too large to scan and upload.`,
-      'Run /skyhop without --full-resume to use the brief handoff.',
+      'Run /skyhop --summary to hand off with a summary instead.',
     );
   }
   return { path: match, bytes };
@@ -50,7 +50,7 @@ export function measureUpload(transcript, repoBytes, limit = MAX_UPLOAD_BYTES) {
     const mb = bytes => Math.round(bytes / 1e6);
     throw new SkyhopError(
       `This upload would be about ${mb(compressed + repoBytes)} MB (transcript ${mb(compressed)} MB, repository ${mb(repoBytes)} MB), and uploads are capped at 100 MB.`,
-      'Run /skyhop without --full-resume to use the brief handoff.',
+      'Run /skyhop --summary to hand off with a summary instead.',
     );
   }
   return compressed;

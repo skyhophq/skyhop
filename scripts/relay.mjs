@@ -186,6 +186,15 @@ function restoreTranscript(root, sessionId) {
   return dest;
 }
 
+// The recap at the top of the first message is for the user to read. The resumed
+// session already has the full history, so it never sees the recap.
+export function stripRecap(prompt) {
+  const start = prompt.indexOf('--- Where we left off');
+  const end = prompt.indexOf('--- End of recap ---');
+  if (start < 0 || end < start) return prompt;
+  return `${prompt.slice(0, start)}${prompt.slice(end + '--- End of recap ---'.length)}`.trim();
+}
+
 // The key arrives in the first message. A rebuilt VM has lost its copy, but the chat
 // history comes back with it, so the key is read from there.
 function storeKey(root, prompt, chatTranscript) {
@@ -197,7 +206,7 @@ function storeKey(root, prompt, chatTranscript) {
     const found = fs.readFileSync(chatTranscript, 'utf8').match(KEY_PATTERN)?.[1];
     if (found) fs.writeFileSync(file, `${found}\n`, { mode: 0o600 });
   }
-  return prompt.replace(KEY_PATTERN, '').trim();
+  return stripRecap(prompt.replace(KEY_PATTERN, '').trim());
 }
 
 function runResume(root, sessionId, mode, prompt) {

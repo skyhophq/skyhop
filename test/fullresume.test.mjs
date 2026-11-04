@@ -29,8 +29,8 @@ test('finds a transcript in any project folder', t => {
   assert.deepEqual(findTranscript(SESSION, root), { path: path.join(root, `project-b/${SESSION}.jsonl`), bytes: 5 });
 });
 
-test('a missing transcript or session ID points to the brief handoff', t => {
-  assert.throws(() => findTranscript(SESSION, tempDir(t)), error => /not found/.test(error.message) && /without --full-resume/.test(error.hint));
+test('a missing transcript or session ID points to the summary handoff', t => {
+  assert.throws(() => findTranscript(SESSION, tempDir(t)), error => /not found/.test(error.message) && /--summary/.test(error.hint));
   assert.throws(() => findTranscript(undefined, tempDir(t)), /needs the session ID/);
 });
 
