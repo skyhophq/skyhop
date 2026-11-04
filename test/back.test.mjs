@@ -3,66 +3,10 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { localTurnsAfter } from '../scripts/back.mjs';
-import { handlePrompt } from '../scripts/relay.mjs';
-import { dirty, makeRepo, run, tempDir, write } from './helpers.mjs';
-
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const SCRIPT = path.join(HERE, '../scripts/skyhop.mjs');
-const FIXTURES = path.join(HERE, 'fixtures');
-const SESSION = '11111111-2222-3333-4444-555555555555';
-const LOCAL = `{"type":"user","sessionId":"${SESSION}","message":{"content":"before the handoff"}}\n`;
-const CLOUD = `{"type":"user","sessionId":"${SESSION}","message":{"content":"from my phone"}}\n{"type":"assistant","sessionId":"${SESSION}","message":{"content":[]}}\n`;
-
-function setup(t, options) {
-  const repo = makeRepo(t, options);
-  const home = path.join(repo.base, 'home');
-  const briefFile = path.join(home, '.skyhop/briefs/brief.md');
-  write(home, '.skyhop/briefs/brief.md', '## Goal\nShip it.\n');
-  write(home, `.claude/projects/some-project/${SESSION}.jsonl`, LOCAL);
-  const localSession = path.join(home, `.claude/projects/some-project/${SESSION}.jsonl`);
-  const skyhop = (args, env = {}) => {
-    const result = spawnSync('node', [SCRIPT, ...args], {
-      cwd: repo.root,
-      encoding: 'utf8',
-      env: {
-        ...process.env, HOME: home, PATH: `${FIXTURES}:${process.env.PATH}`, FAKE_CLAUDE_DIR: repo.base,
-        FAKE_CLAUDE_MODE: '', SKYHOP_LAUNCH_WAIT_MS: '5000', SKYHOP_LAUNCH_SETTLE_MS: '100', ...env,
-      },
-    });
-    return { ...result, output: `${result.stdout}${result.stderr}` };
-  };
-  const handOff = (...flags) => {
-    const result = skyhop(['--brief', briefFile, '--session', SESSION, '--yes', '--full-resume', ...flags]);
-    assert.equal(result.status, 0, result.output);
-    return path.join(repo.base, 'vm');
-  };
-  // Runs the real relay in the fake VM, as the hook would for the first message.
-  const cloudWork = (vm, { chat = CLOUD, code = true } = {}) => {
-    const realHome = process.env.HOME;
-    process.env.HOME = path.join(repo.base, 'vm-home');
-    try {
-      const first = fs.readFileSync(path.join(repo.base, 'prompt'), 'utf8');
-      const output = handlePrompt({
-        prompt: first,
-        hookMode: 'default',
-        root: vm,
-        resume: (_root, sessionId) => {
-          fs.appendFileSync(path.join(process.env.HOME, '.claude/projects/skyhop-import', `${sessionId}.jsonl`), chat);
-          if (code) write(vm, 'cloud-work.txt', 'made in the cloud\n');
-          return { status: 0, stdout: JSON.stringify({ type: 'result', result: 'done' }) };
-        },
-      });
-      assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /could not save|Warning/);
-    } finally {
-      process.env.HOME = realHome;
-    }
-  };
-  const syncBranches = () => run(repo.bare, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/skyhop-sync');
-  return { ...repo, home, skyhop, handOff, cloudWork, localSession, syncBranches };
-}
+import { dirty, run, tempDir, write } from './helpers.mjs';
+import { CLOUD, LOCAL, SESSION, setup } from './roundtrip.mjs';
 
 test('the handoff pushes one start branch with the transcript encrypted', t => {
   const { bare, base, handOff, syncBranches } = setup(t);
@@ -107,18 +51,25 @@ test('the key never reaches GitHub', t => {
 test('the round trip adds the cloud conversation to the same session and brings the code', t => {
   const { root, bare, home, skyhop, handOff, cloudWork, localSession, syncBranches } = setup(t);
   dirty(root);
+  const staged = run(root, 'diff', '--cached', '--name-only');
   cloudWork(handOff());
 
   const result = skyhop(['--back']);
   assert.equal(result.status, 0, result.output);
   assert.equal(fs.readFileSync(localSession, 'utf8'), LOCAL + CLOUD);
   assert.ok(result.output.includes(`claude --resume ${SESSION}`));
+  assert.match(result.output, /in your files on main, not committed/);
 
-  assert.match(run(root, 'symbolic-ref', '--short', 'HEAD'), /^skyhop\/back-/);
+  // The cloud's work joins the local work on the same branch, with no new commits.
+  assert.equal(run(root, 'symbolic-ref', '--short', 'HEAD'), 'main');
+  assert.equal(run(root, 'rev-parse', 'main'), run(root, 'rev-parse', 'origin/main'));
+  assert.equal(run(root, 'diff', '--cached', '--name-only'), staged);
   assert.equal(fs.readFileSync(path.join(root, 'cloud-work.txt'), 'utf8'), 'made in the cloud\n');
   assert.equal(fs.readFileSync(path.join(root, 'tracked.txt'), 'utf8'), 'changed\n');
+  assert.equal(fs.readFileSync(path.join(root, 'new-file.txt'), 'utf8'), 'untracked\n');
+  assert.equal(fs.readFileSync(path.join(root, 'ignored.txt'), 'utf8'), 'ignored\n');
   assert.equal(fs.readFileSync(path.join(root, '.env'), 'utf8'), 'NAME=value\n');
-  assert.equal(run(root, 'rev-parse', 'main'), run(root, 'rev-parse', 'origin/main'));
+  assert.equal(run(root, 'branch', '--list', 'skyhop/*'), '');
 
   assert.equal(syncBranches(), '');
   assert.equal(run(bare, 'for-each-ref', 'refs/heads/skyhop-run'), '');
@@ -145,7 +96,9 @@ test('bringing back twice does not add the conversation twice', t => {
   cloudWork(handOff());
   skyhop(['--back']);
   const second = skyhop(['--back']);
-  assert.equal(second.status, 1);
+  assert.equal(second.status, 0);
+  assert.match(second.output, /already brought the session you handed off on .* home/);
+  assert.ok(second.output.includes(`claude --resume ${SESSION}`));
   assert.equal(fs.readFileSync(localSession, 'utf8'), LOCAL + CLOUD);
 });
 
@@ -176,12 +129,15 @@ test('work typed locally after the handoff is kept, and the cloud work becomes a
   assert.equal(forked, (LOCAL + CLOUD).replaceAll(SESSION, newId));
 });
 
-test('a session still open in a window becomes a new session', t => {
-  const { skyhop, handOff, cloudWork, localSession } = setup(t);
+test('a session still open in a window is left alone, with no extra session made', t => {
+  const { skyhop, handOff, cloudWork, localSession, remoteBranches } = setup(t);
   cloudWork(handOff());
   const result = skyhop(['--back'], { FAKE_CLAUDE_AGENTS: JSON.stringify([{ sessionId: SESSION, status: 'idle' }]) });
-  assert.match(result.output, /still open in a Claude Code window/);
+  assert.equal(result.status, 1);
+  assert.match(result.output, /open in a Claude Code window, maybe this one, so nothing was changed/);
   assert.equal(fs.readFileSync(localSession, 'utf8'), LOCAL);
+  assert.equal(fs.readdirSync(path.dirname(localSession)).length, 1);
+  assert.notEqual(remoteBranches('skyhop-run'), '');
 });
 
 test('local changes since the handoff are left alone, and the code waits on a branch', t => {

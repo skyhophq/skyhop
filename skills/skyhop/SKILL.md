@@ -29,6 +29,6 @@ Follow these steps in order.
    node "${CLAUDE_PLUGIN_ROOT}/scripts/skyhop.mjs" --brief ~/.skyhop/briefs/${CLAUDE_SESSION_ID}.md --session ${CLAUDE_SESSION_ID} --yes $ARGUMENTS
    ```
 
-5. **Report** in one or two lines: the branch and the session link.
+5. **Report** in one or two lines: the branch and the session link. If it printed the line about quitting this window, pass that on too: the session comes home as the same session when the user opens it again on this machine and sends a message.
 
    This usually starts by itself. If it printed a command for the user's own terminal instead, give them that command exactly, in a code block. Tell them to run it in a separate terminal window, not with `!` here, because it needs a real terminal.

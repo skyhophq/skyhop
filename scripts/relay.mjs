@@ -6,7 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isSensitivePath, scanDiff } from './secrets.mjs';
-import { KEY_PATTERN, openTranscript, readKey, restoreProgress, saveProgress } from './sync.mjs';
+import {
+  cloudState, KEY_PATTERN, markBusy, openTranscript, readKey, restoreProgress, saveProgress,
+} from './sync.mjs';
 
 export const RELAY_COMMIT_MARKER = 'skyhop-relay-commit';
 
@@ -19,6 +21,8 @@ const ERROR_TEXT_LIMIT = 1500;
 const CONTEXT_LIMIT = 9000;
 
 const SCRUB_WARNING = 'Warning: Skyhop could not remove the session transcript from git in this VM. Do not push this branch.';
+export const HOME_NOTE = 'This session has gone back to your computer, so Skyhop no longer passes messages from this chat to it, and nothing sent here is saved. To work in the cloud again, run /skyhop on your computer.';
+const HOME_DURING_REPLY = 'This session went back to your computer while this reply was running, so this reply was not saved there.';
 
 // bypassPermissions is left out on purpose: the relay must never widen what the
 // session allows, and cloud sessions do not offer that mode anyway.
@@ -227,26 +231,39 @@ export function modeRequest(prompt) {
   return [...HANDOFF_MODES].find(mode => mode.toLowerCase() === match[1].toLowerCase());
 }
 
-function saveQuietly(root, transcript) {
+function saveQuietly(root, transcript, busy) {
   try {
-    return saveProgress({ root, transcript, isExcluded: isSensitivePath, scan: scanDiff });
+    return saveProgress({ root, transcript, isExcluded: isSensitivePath, scan: scanDiff, busy });
   } catch (error) {
     return `Skyhop could not save this message for /skyhop-back. (${error.message})`;
   }
 }
 
+const GITHUB = { check: cloudState, busy: markBusy };
+
 // Returns the hook's JSON output, or null to let the outer session handle the message.
-export function handlePrompt({ prompt: rawPrompt, hookMode, root, chatTranscript, resume = runResume, save = saveQuietly }) {
+export function handlePrompt({
+  prompt: rawPrompt, hookMode, root, chatTranscript, resume = runResume, save = saveQuietly, github = GITHUB,
+}) {
   const marker = name => path.join(root, '.skyhop', name);
+  const output = text => relayOutput(text, long => saveLongReply(root, long));
   if (fs.existsSync(marker('fallback'))) return null;
+  if (fs.existsSync(marker('home'))) return output(HOME_NOTE);
 
   const prompt = storeKey(root, rawPrompt, chatTranscript);
   const warning = scrubRelayCommit(root);
   const requestedMode = modeRequest(prompt);
   if (requestedMode) {
     fs.writeFileSync(marker('mode'), `${requestedMode}\n`);
-    return relayOutput(`Permission mode is now ${requestedMode}.`, long => saveLongReply(root, long));
+    return output(`Permission mode is now ${requestedMode}.`);
   }
+
+  const before = github.check(root);
+  if (before.state === 'closed') {
+    fs.writeFileSync(marker('home'), '');
+    return output(HOME_NOTE);
+  }
+  const busy = before.state === 'open' ? github.busy(root, before) : null;
 
   const mode = resolveMode(hookMode, readHandoffMode(root));
   const isFirstMessage = !fs.existsSync(marker('resumed'));
@@ -276,7 +293,13 @@ export function handlePrompt({ prompt: rawPrompt, hookMode, root, chatTranscript
     reply = `Skyhop relay failed (exit ${run?.status ?? 'none'}): ${detail}`;
   }
 
-  const saveWarning = transcript ? save(root, transcript) : null;
+  let saveWarning = null;
+  if (transcript && before.state === 'open' && github.check(root).state === 'closed') {
+    fs.writeFileSync(marker('home'), '');
+    saveWarning = HOME_DURING_REPLY;
+  } else if (transcript) {
+    saveWarning = save(root, transcript, busy);
+  }
   const debug = fs.existsSync(marker('debug'));
   const parts = [debug ? `[skyhop-relay hook=${hookMode} used=${mode}]` : null, warning, reply, saveWarning].filter(Boolean);
   return relayOutput(parts.join('\n\n'), long => saveLongReply(root, long));

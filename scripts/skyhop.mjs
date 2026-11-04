@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
-import { bringBack, saveHandoffRecord } from './back.mjs';
+import { bringBack, saveHandoffRecord, waitingRecords } from './back.mjs';
 import { briefPrompt, loadBrief, redactPaths, resumePrompt } from './brief.mjs';
 import { launchSession, launchTimes, pasteCommand, readHistory, recordHandoff, requireSignIn } from './cloud.mjs';
 import { addRelayCommit, findTranscript, LARGE_TRANSCRIPT_BYTES, measureUpload } from './fullresume.mjs';
@@ -13,6 +13,7 @@ import {
   createSnapshot, git, maskUrl, pendingCommitCount, pendingDiff, prepareLaunchFolder, publicRemoteUrl,
   pushBranch, removeLaunchFolder, repoBytes, repoInfo, skyhopBranch, SkyhopError, snapshotStat,
 } from './git.mjs';
+import { findLeftovers, formatLeftovers, removeLeftovers } from './leftovers.mjs';
 import { formatFinding, isSensitivePath, scanDiff, scanText } from './secrets.mjs';
 import { newKey } from './sync.mjs';
 
@@ -39,6 +40,7 @@ function readOptions(args) {
         'allow-secrets': { type: 'boolean', default: false },
         status: { type: 'boolean', default: false },
         back: { type: 'boolean', default: false },
+        clean: { type: 'boolean', default: false },
         'no-sync': { type: 'boolean', default: false },
       },
     }).values;
@@ -136,10 +138,13 @@ function savePrompt(briefFile, prompt) {
   return file;
 }
 
-function reportLaunch({ outcome, command, record }) {
+const COMING_HOME = 'Quit this window now (type /exit). When you are back, open claude in this folder and pick this session in /resume: it will have the cloud conversation, and it comes home for good when you send a message.';
+
+function reportLaunch({ outcome, command, record, synced }) {
   if (outcome.status === 'started') {
     recordHandoff({ ...record, status: 'started', sessionId: outcome.sessionId, url: outcome.url });
     console.log(`\nCloud session started on ${record.branch}.\nSession ID: ${outcome.sessionId}\nLink: ${outcome.url}`);
+    if (synced) console.log(`\n${COMING_HOME}`);
     return 0;
   }
   if (outcome.status === 'needs-terminal') {
@@ -216,12 +221,15 @@ async function handoff(options) {
   const promptFile = savePrompt(options.brief, firstMessage);
   if (fullResume) {
     const sync = useSync
-      ? { chatRef: `skyhop-sync/${tail}-chat`, codeRef: `skyhop-sync/${tail}-code`, remoteUrl: publicRemoteUrl(info.remoteUrl), snapshotTree: snapshot.tree, finalBranch: branch }
+      ? {
+        chatRef: `skyhop-sync/${tail}-chat`, codeRef: `skyhop-sync/${tail}-code`, runBranch: startBranch,
+        remoteUrl: publicRemoteUrl(info.remoteUrl), snapshotTree: snapshot.tree, finalBranch: branch,
+      }
       : null;
     const baseBytes = addRelayCommit(dir, { transcript, sessionId: options.session, mode: options.mode, brief, sync, key });
     saveHandoffRecord({
       sessionId: options.session, repoRoot: info.root, at: new Date().toISOString(), branch, baseBytes,
-      head: info.head, snapshotTree: snapshot.tree, sync: sync && { ...sync, key, runBranch: startBranch },
+      head: info.head, snapshotTree: snapshot.tree, sync: sync && { ...sync, key },
     });
     if (useSync) pushBranch(info, git(dir, ['rev-parse', 'HEAD']), startBranch);
   }
@@ -237,7 +245,7 @@ async function handoff(options) {
   try {
     const outcome = await launchSession({ dir, prompt: firstMessage, env, ...launchTimes(fullResume && !useSync ? transcript.compressed + repoSize : 0) });
     if (outcome.status !== 'needs-terminal') removeLaunchFolder(info);
-    return reportLaunch({ outcome, command, record });
+    return reportLaunch({ outcome, command, record, synced: useSync });
   } catch (error) {
     if (error instanceof SkyhopError) {
       recordHandoff({ ...record, status: `failed: ${error.message}` });
@@ -247,23 +255,53 @@ async function handoff(options) {
   }
 }
 
-function showStatus() {
+function currentRepo() {
+  try {
+    return repoInfo(process.cwd());
+  } catch {
+    return null;
+  }
+}
+
+function showStatus({ clean }) {
+  const info = currentRepo();
+  if (clean) {
+    if (!info) throw new SkyhopError('This folder is not inside a git repository.', 'Run /skyhop-status --clean from the repository to tidy.');
+    const leftovers = findLeftovers(info, os.homedir());
+    if (!leftovers) throw new SkyhopError(`Could not reach ${info.remote}, so nothing was removed.`, 'Check your connection, then try again.');
+    if (leftovers.removable.length === 0) {
+      console.log('Nothing to remove.');
+      return 0;
+    }
+    const { removed, failed } = removeLeftovers(info, leftovers);
+    if (removed.length > 0) console.log(`Removed:\n${removed.map(name => `  ${name}`).join('\n')}`);
+    if (failed.length > 0) console.log(`Could not remove:\n${failed.map(name => `  ${name}`).join('\n')}`);
+    return failed.length > 0 ? 1 : 0;
+  }
+
+  const waiting = waitingRecords(undefined, os.homedir()).filter(record => record.sync);
+  if (waiting.length > 0) {
+    console.log('In the cloud now. Each comes home when you send it a message on this Mac:');
+    for (const record of waiting) console.log(`  ${record.at}  ${path.basename(record.repoRoot)}  session ${record.sessionId}`);
+    console.log('');
+  }
   const history = readHistory().slice(-STATUS_LIMIT).reverse();
   if (history.length === 0) {
     console.log('No handoffs yet.');
-    return 0;
+  } else {
+    console.log(`Last ${history.length} handoff(s), newest first. Open a link to see live progress.\n`);
+    for (const entry of history) {
+      console.log(`${entry.at}  ${entry.mode}  ${entry.status}\n  ${entry.repo}  ${entry.branch}\n  ${entry.url ?? 'no link recorded'}\n`);
+    }
   }
-  console.log(`Last ${history.length} handoff(s), newest first. Open a link to see live progress.\n`);
-  for (const entry of history) {
-    console.log(`${entry.at}  ${entry.mode}  ${entry.status}\n  ${entry.repo}  ${entry.branch}\n  ${entry.url ?? 'no link recorded'}\n`);
-  }
+  if (info?.remote) console.log(formatLeftovers(info, findLeftovers(info, os.homedir())));
   return 0;
 }
 
 async function main() {
   const options = readOptions(process.argv.slice(2));
   if (options.back) return bringBack({ session: options.session, dryRun: options['dry-run'] });
-  return options.status ? showStatus() : handoff(options);
+  return options.status || options.clean ? showStatus(options) : handoff(options);
 }
 
 try {

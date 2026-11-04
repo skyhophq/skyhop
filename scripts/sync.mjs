@@ -15,6 +15,7 @@ export const TRANSCRIPT_PART_BYTES = 45 * 1024 * 1024;
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
 const PUSH_TIMEOUT_MS = 120_000;
+const CHECK_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT = 256 * 1024 * 1024;
 const ERROR_TEXT_LIMIT = 300;
 const AUTHOR = {
@@ -161,9 +162,59 @@ function pushRefs(root, config, refspecs, timeout) {
   return failure;
 }
 
+// The Mac deletes the start branch when the session comes home, so its absence
+// means messages here no longer reach the session. Returns "open" with the branch's
+// commit, "closed", or "unknown" when GitHub can't be reached or sync is off.
+export function cloudState(root) {
+  const config = readJson(path.join(root, '.skyhop', 'sync.json'));
+  if (!config?.runBranch) return { state: 'unknown' };
+  for (const target of pushTargets(root, config)) {
+    const run = git(root, ['ls-remote', '--heads', target, `refs/heads/${config.runBranch}`], { timeout: CHECK_TIMEOUT_MS });
+    if (run.status !== 0) continue;
+    const sha = String(run.stdout).split('\t')[0].trim();
+    return sha ? { state: 'open', target, sha, config } : { state: 'closed' };
+  }
+  return { state: 'unknown' };
+}
+
+export function pulseRef(chatRef) {
+  return chatRef.replace(/-chat$/, '-pulse');
+}
+
+function readPulse(skyhop) {
+  try {
+    return fs.readFileSync(path.join(skyhop, 'pulse'), 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// While a reply runs, the pulse branch is one commit ahead of the chat branch, so
+// the Mac can tell from a single listing not to bring the session home halfway
+// through. The save then builds on that commit and moves both branches to the same
+// place. Both only ever move forward, so nothing in the VM deletes a branch.
+// Returns the commit, or null if it couldn't be pushed.
+export function markBusy(root, open) {
+  const skyhop = path.join(root, '.skyhop');
+  try {
+    const state = readJson(path.join(skyhop, 'sync-state.json'));
+    const parent = readPulse(skyhop) ?? state?.chatTip ?? null;
+    const tree = parent
+      ? must(git(root, ['rev-parse', `${parent}^{tree}`]), 'rev-parse')
+      : must(git(root, ['mktree'], { input: '' }), 'mktree');
+    const sha = must(git(root, ['commit-tree', tree, ...(parent ? ['-p', parent] : []), '-m', 'Skyhop: a reply is running'], { env: AUTHOR }), 'commit-tree');
+    const run = git(root, ['push', '-q', open.target, `${sha}:refs/heads/${pulseRef(open.config.chatRef)}`], { timeout: CHECK_TIMEOUT_MS });
+    if (run.status !== 0) return null;
+    fs.writeFileSync(path.join(skyhop, 'pulse'), sha);
+    return sha;
+  } catch {
+    return null;
+  }
+}
+
 // Returns a warning for the user, or null when everything is saved. The state
 // only moves forward after a successful push, so a failed save retries next time.
-export function saveProgress({ root, transcript, isExcluded = () => false, scan = () => [], timeout = PUSH_TIMEOUT_MS }) {
+export function saveProgress({ root, transcript, isExcluded = () => false, scan = () => [], timeout = PUSH_TIMEOUT_MS, busy = null }) {
   const skyhop = path.join(root, '.skyhop');
   const config = readJson(path.join(skyhop, 'sync.json'));
   if (!config) return null;
@@ -176,13 +227,19 @@ export function saveProgress({ root, transcript, isExcluded = () => false, scan 
   const refspecs = [];
   const warnings = [];
 
+  // A busy commit from an earlier save that failed is built on too, so the pulse
+  // branch can still catch up.
+  const pulse = busy ?? readPulse(skyhop);
   const chunk = newLines(transcript, state.sentBytes);
   if (chunk) {
     next.seq = state.seq + 1;
     next.sentBytes = chunk.to;
-    next.chatTip = commitChunk(root, state.chatTip, chunkName(next.seq), sealChunk(chunk, key, next.seq));
-    refspecs.push(`${next.chatTip}:refs/heads/${config.chatRef}`);
+    next.chatTip = commitChunk(root, pulse ?? state.chatTip, chunkName(next.seq), sealChunk(chunk, key, next.seq));
+  } else if (pulse) {
+    next.chatTip = pulse;
   }
+  if (next.chatTip !== state.chatTip) refspecs.push(`${next.chatTip}:refs/heads/${config.chatRef}`);
+  if (pulse && refspecs.length > 0) refspecs.push(`${next.chatTip}:refs/heads/${pulseRef(config.chatRef)}`);
 
   const tree = codeTree(root, isExcluded);
   if (tree !== state.codeTree) {
@@ -200,10 +257,11 @@ export function saveProgress({ root, transcript, isExcluded = () => false, scan 
   if (refspecs.length > 0) {
     const failure = pushRefs(root, config, refspecs, timeout);
     if (failure) {
-      warnings.push(`Skyhop could not save this message to GitHub, so /skyhop-back won't have it yet. It will try again on your next message. (${failure})`);
+      warnings.push(`Skyhop could not save this message to GitHub, so your Mac won't have it yet. It will try again on your next message. (${failure})`);
       return warnings.join('\n\n');
     }
   }
+  if (pulse) fs.writeFileSync(path.join(skyhop, 'pulse'), next.chatTip);
   fs.writeFileSync(stateFile, JSON.stringify(next));
   return warnings.length > 0 ? warnings.join('\n\n') : null;
 }
