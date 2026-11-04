@@ -131,7 +131,7 @@ Skyhop keeps its files in `~/.skyhop/`: briefs, a history of handoffs, the keys 
 - `/skyhop-status` lists links from this machine. It can't show live progress, so open the link for that.
 - Brief handoff branches, and full-resume branches you never bring home, stay on your remote until you delete them.
 - If the Claude GitHub App isn't installed on your repository, `--cloud` uploads it directly instead of cloning, and that session can't push. Full resume still works, but each reply warns that nothing is being saved for `/skyhop-back`.
-- Sessions land in the app's **Cloud** list, not under their project folder. Starting the message with the project name gives Claude a hint for the title, but only sessions started inside the app get a folder.
+- The desktop app groups cloud sessions by their GitHub repo, so a handoff from a repo you have open in the app appears under that project. A session uploaded directly has no repo link and appears under **Cloud**. That happens with `--no-sync`, with no remote, or when the Claude GitHub App isn't set up on the repo.
 - If Skyhop can't take its commit out of git history in the VM, it warns you in the chat. Don't push that branch.
 
 ## Development
