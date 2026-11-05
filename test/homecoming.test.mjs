@@ -47,7 +47,7 @@ test('the first message here closes the cloud chat and brings the code', t => {
 
   // The cloud chat now says where the session went, and saves nothing.
   const reply = cloudWork(vm, { prompt: 'still there?', check: false });
-  assert.match(reply.hookSpecificOutput.additionalContext, /gone back to your computer/);
+  assert.match(reply, /gone back to your computer/);
   assert.equal(syncBranches(), '');
   assert.equal(remoteBranches('skyhop-run'), '');
 });

@@ -14,6 +14,18 @@ if [ "$1" = "agents" ]; then
   exit 0
 fi
 
+# claude -p --resume <id> ...: the resumed session inside the VM. It reports one step,
+# works for FAKE_INNER_SECONDS, then replies.
+if [ "$1" = "-p" ] && [ "$2" = "--resume" ]; then
+  cat > "$FAKE_CLAUDE_DIR/inner-prompt"
+  printf '%s' "$SKYHOP_INNER" > "$FAKE_CLAUDE_DIR/inner-env"
+  echo '{"type":"system","subtype":"init"}'
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"npm test"}}]}}'
+  sleep "${FAKE_INNER_SECONDS:-0}"
+  echo '{"type":"result","result":"fake inner reply"}'
+  exit 0
+fi
+
 # claude -p --cloud <id> --output-format json: posts a message into an existing chat.
 if [ "$1" = "-p" ] && [ "$2" = "--cloud" ]; then
   if [ "$FAKE_CLAUDE_SEND" = "archived" ]; then

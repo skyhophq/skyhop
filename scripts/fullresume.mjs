@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 import { git, SkyhopError, tryGit } from './git.mjs';
-import { RELAY_COMMIT_MARKER } from './relay.mjs';
+import { RELAY_COMMIT_MARKER, WAIT_COMMAND } from './relay.mjs';
 import { sealTranscript } from './sync.mjs';
 
 // A direct upload is capped at 100 MB after compression, shared with the repository.
@@ -16,8 +16,14 @@ export const MAX_UPLOAD_BYTES = 95 * 1024 * 1024;
 export const MAX_TRANSCRIPT_BYTES = 400 * 1024 * 1024;
 export const LARGE_TRANSCRIPT_BYTES = 10 * 1024 * 1024;
 
-const HOOK_TIMEOUT_SECONDS = 21600;
+// The hook only starts each message, and the work runs in the background. A hook
+// that hangs is stopped well before the cloud would stop the whole VM, at about 25
+// minutes with no activity.
+const HOOK_TIMEOUT_SECONDS = 1200;
 const RELAY_COMMAND = 'node "$CLAUDE_PROJECT_DIR/.skyhop/relay.mjs"';
+// Claude in the chat runs this over and over while a message is worked on, so it
+// must never stop for approval.
+const WAIT_RULE = `Bash(${WAIT_COMMAND})`;
 const SCRIPTS = path.dirname(fileURLToPath(import.meta.url));
 // Everything the relay needs in the VM, where the plugin isn't installed.
 const VM_SCRIPTS = ['relay.mjs', 'secrets.mjs', 'sync.mjs'];
@@ -68,10 +74,12 @@ export function mergeSettings(existing) {
     }
   }
   const hooks = settings.hooks ?? {};
+  const permissions = settings.permissions ?? {};
   const entry = { hooks: [{ type: 'command', command: RELAY_COMMAND, timeout: HOOK_TIMEOUT_SECONDS, onFailure: 'block' }] };
   return `${JSON.stringify({
     ...settings,
     model: settings.model ?? 'haiku',
+    permissions: { ...permissions, allow: [...(permissions.allow ?? []), WAIT_RULE] },
     hooks: { ...hooks, UserPromptSubmit: [...(hooks.UserPromptSubmit ?? []), entry] },
   }, null, 2)}\n`;
 }

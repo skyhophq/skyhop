@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { handlePrompt } from '../scripts/relay.mjs';
+import { handlePrompt, replyNow, runJob, WAIT_COMMAND } from '../scripts/relay.mjs';
 import { makeRepo, run, write } from './helpers.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -59,7 +59,8 @@ export function setup(t, options) {
     return result;
   };
   // Runs the real relay in the fake VM, as the hook would. The first call sends the
-  // handoff's first message, later calls send `prompt`.
+  // handoff's first message, later calls send `prompt`. The job runs to the end before
+  // the hook returns, and this returns what Claude in the chat would show.
   const cloudWork = (dir, { chat = CLOUD, code = true, prompt, check = true, busyCheck } = {}) => {
     const realHome = process.env.HOME;
     process.env.HOME = path.join(repo.base, 'vm-home');
@@ -72,14 +73,20 @@ export function setup(t, options) {
       };
       // A reopened chat hands the message to the new handoff's relay. Here that runs
       // in this process, with the same stand-in for the resumed session.
-      const relay = input => handlePrompt({ ...input, resume, rerun: relay });
+      const start = root => {
+        runJob(root, { resume });
+        return null;
+      };
+      const relay = input => handlePrompt({ ...input, start, rerun: relay });
       const output = relay({
         prompt: prompt ?? fs.readFileSync(path.join(repo.base, 'prompt'), 'utf8'),
         hookMode: 'default',
         root: dir,
       });
-      if (check) assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /could not save|Warning/);
-      return output;
+      const context = output.hookSpecificOutput.additionalContext;
+      const shown = context.includes(WAIT_COMMAND) ? replyNow(dir) : context;
+      if (check) assert.doesNotMatch(shown, /could not save|Warning/);
+      return shown;
     } finally {
       process.env.HOME = realHome;
     }

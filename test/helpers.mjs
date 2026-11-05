@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -68,4 +68,37 @@ export function fingerprint(root) {
     status: execFileSync('git', ['--no-optional-locks', 'status', '--porcelain'], { cwd: root, encoding: 'utf8' }),
     files: Object.fromEntries(files.map(file => [file, hash(path.join(root, file))])),
   };
+}
+
+export function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// A stand-in for the relay's background runner that keeps going until it is stopped.
+// Like the real one, it leads its own process group and has no parent waiting on it.
+export function sleeper(t) {
+  const launch = "const c = require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' }); c.unref(); console.log(c.pid)";
+  const pid = Number(spawnSync(process.execPath, ['-e', launch], { encoding: 'utf8' }).stdout.trim());
+  t.after(() => {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  });
+  return pid;
+}
+
+// The same boot ID the relay records, so a planted job counts as this boot's.
+export function bootId() {
+  try {
+    return fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+  } catch {
+    return null;
+  }
 }

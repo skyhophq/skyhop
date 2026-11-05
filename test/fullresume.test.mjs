@@ -63,7 +63,9 @@ test('the hook is added to an empty settings file', () => {
   const [entry] = settings.hooks.UserPromptSubmit;
   assert.match(entry.hooks[0].command, /\.skyhop\/relay\.mjs/);
   assert.equal(entry.hooks[0].onFailure, 'block');
+  assert.ok(entry.hooks[0].timeout < 25 * 60, 'a hung hook stops before the cloud stops the VM');
   assert.equal(settings.model, 'haiku');
+  assert.deepEqual(settings.permissions.allow, ['Bash(node .skyhop/relay.mjs wait)']);
 });
 
 test('existing settings and hooks are kept', () => {
@@ -74,7 +76,7 @@ test('existing settings and hooks are kept', () => {
   });
   const settings = JSON.parse(mergeSettings(existing));
   assert.equal(settings.model, 'opus');
-  assert.deepEqual(settings.permissions, { deny: ['Read(./.env)'] });
+  assert.deepEqual(settings.permissions, { deny: ['Read(./.env)'], allow: ['Bash(node .skyhop/relay.mjs wait)'] });
   assert.equal(settings.hooks.UserPromptSubmit.length, 2);
   assert.equal(settings.hooks.UserPromptSubmit[0].hooks[0].command, 'mine');
   assert.ok(settings.hooks.Stop);

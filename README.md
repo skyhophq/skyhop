@@ -56,7 +56,7 @@ Skyhop needs Node.js 20 or later, git, and a claude.ai sign-in on a plan that in
 | | Summary handoff (`/skyhop --summary`) | Full resume (`/skyhop`, the default) |
 | --- | --- | --- |
 | **Conversation** | A brief plus recent turns, written by Claude | The real session transcript, resumed inside the VM |
-| **Chat experience** | A normal cloud session with live tool activity | Normal-looking replies, but no live tool activity |
+| **Chat experience** | A normal cloud session with live tool activity | Normal-looking replies, with a progress line about every 100 seconds instead of live tool activity |
 | **Code travels by** | A `skyhop/...` branch pushed to your remote | A `skyhop-run/...` branch, with the transcript encrypted |
 | **Permission mode** | Set in the chat | Set at handoff, and changed by sending a message |
 | **Usage** | Normal | Each reply is generated twice |
@@ -70,15 +70,18 @@ Skyhop snapshots your work to a new branch and starts a cloud session on it. The
 
 ### Full resume
 
-Skyhop pushes your code and the session's transcript to a `skyhop-run/...` branch, with the transcript encrypted. The key goes only in the first message of the cloud session, never through GitHub. A hook in the VM decrypts the transcript and starts a second Claude Code process with `--resume`, which loads the real conversation. That process does the work, and the chat Claude repeats each reply.
+Skyhop pushes your code and the session's transcript to a `skyhop-run/...` branch, with the transcript encrypted. The key goes only in the first message of the cloud session, never through GitHub. A hook in the VM decrypts the transcript and starts a second Claude Code process with `--resume`, which loads the real conversation. That process does the work in the background. Meanwhile the chat Claude waits by running a short Skyhop command about every 100 seconds, then repeats the reply.
 
 **Your session continues in the cloud, from a copy of its transcript.** The cloud chat you type into is a new chat that passes your messages to it, because Anthropic's cloud can't adopt a local session. That chat can't show your old messages, so its first message is a recap of where you left off. The session itself has the full history, and it comes back to your machine as the same session. The limits are:
 
-- **No live tool activity.** You see the final reply to each message, followed by a **Steps taken** list of what it did.
-- **Replies are generated twice**, once by the resumed session and once by the chat Claude repeating them. The chat Claude runs on Haiku to keep this cheap, and it could change the wording slightly.
-- **The mode picker in the chat has no effect.** Send `skyhop mode auto`, `skyhop mode acceptEdits` or `skyhop mode plan` as a message instead.
+- **Progress instead of live tool activity.** While a message runs, the chat shows a `node .skyhop/relay.mjs wait` command about every 100 seconds, each with how long it has run and its latest steps. The reply then appears with a **Steps taken** list of what it did.
+- **Replies are generated twice**, once by the resumed session and once by the chat Claude repeating them. The chat Claude runs on Haiku to keep this cheap, and it could change the wording slightly. Each wait is also a small Haiku call, so a long message uses a little more.
+- **The mode picker in the chat has no effect.** Send `skyhop mode auto`, `skyhop mode acceptEdits` or `skyhop mode plan` as a message instead. It applies from the next message.
 - **The resumed session can't ask you for approval.** If it needs a tool its mode doesn't allow, the reply says what was blocked and how to allow it.
-- **Long single messages are unproven.** Skyhop allows a message up to six hours, but tests have only confirmed messages of a few minutes, and a task of about 20 minutes gave no result within 40 minutes. Break big jobs into several messages.
+- **One message can run for up to six hours.** A single 36-minute message has been tested through Skyhop. Before version 0.6.0, a message stopped at about 25 minutes, because the cloud stops a machine whose reply shows no activity for that long. The wait commands are that activity.
+- **Send one message at a time.** A message sent while a reply is running isn't passed on, and the reply tells you to send it again.
+- **To stop a long reply,** press stop in the chat, then send `skyhop stop`. The session's work so far is kept and saved.
+- **If the chat stops waiting before the reply,** the session keeps going until the cloud shuts the idle machine down, a few minutes later. The machine keeps its files but not the running work. Your next message then shows the reply if it finished in time, or says the message stopped before it finished.
 - **It depends on an internal file format.** The transcript format can change on any Claude Code release. If the VM can't load it, the session falls back to the brief and says so.
 - **Long sessions use more of your plan on every message.**
 - **The first message of the cloud session shows the decryption key.** It only opens this handoff's transcript, which Skyhop deletes from GitHub once the session is home. Don't share that session publicly before then.

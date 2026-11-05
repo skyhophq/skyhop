@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { handlePrompt } from '../scripts/relay.mjs';
-import { run, write } from './helpers.mjs';
+import { alive, bootId, run, sleeper, write } from './helpers.mjs';
 import { CLOUD, CLOUD2, LOCAL, SESSION, setup } from './roundtrip.mjs';
 
 const start = { source: 'startup', session_id: 'aaaaaaaa-0000-4000-8000-000000000000' };
@@ -60,7 +60,7 @@ test('a second handoff goes back to the same chat, and the session keeps one cha
 
   // The running VM swaps to the new handoff and carries on from the Mac's copy.
   const reply = cloudWork(vm, { chat: CLOUD2, code: 'more-cloud-work.txt' });
-  assert.match(reply.hookSpecificOutput.additionalContext, /done/);
+  assert.match(reply, /SKYHOP-REPLY[\s\S]*done/);
   assert.equal(run(vm, 'symbolic-ref', '--short', 'HEAD'), second.branch);
   assert.ok(!fs.existsSync(path.join(vm, 'cloud-work.txt')), 'a file deleted on the Mac stays deleted');
   assert.ok(fs.existsSync(path.join(vm, '.env.cloud')), 'a sensitive file in the VM is left alone');
@@ -73,6 +73,19 @@ test('a second handoff goes back to the same chat, and the session keeps one cha
   assert.ok(!fs.existsSync(path.join(root, 'cloud-work.txt')));
   assert.equal(fs.readFileSync(path.join(root, 'more-cloud-work.txt'), 'utf8'), 'made in the cloud\n');
   assert.equal(record().cloud.sessionId, CHAT);
+});
+
+test('going back to a chat first stops anything still running from the last handoff', t => {
+  const repo = setup(t);
+  const { vm, handOffAgain, cloudWork } = repo;
+  firstTrip(repo);
+  handOffAgain();
+  const pid = sleeper(t);
+  fs.rmSync(path.join(vm, '.skyhop/job'), { recursive: true, force: true });
+  write(vm, '.skyhop/job/job.json', JSON.stringify({ pid, boot: bootId(), startedAt: Date.now() }));
+  const reply = cloudWork(vm, { chat: CLOUD2, code: false });
+  assert.ok(!alive(pid), 'the old job was stopped');
+  assert.match(reply, /SKYHOP-REPLY[\s\S]*done/);
 });
 
 test('a chat whose VM was shut down picks the handoff up from its start branch', t => {
