@@ -4,9 +4,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import {
-  launchSession, launchTimes, pasteCommand, readHistory, readLaunchOutput, recordHandoff, requireSignIn, shellQuote, terminalCommand,
+  launchSession, launchTimes, pasteCommand, readHistory, readLaunchOutput, recordHandoff, requireSignIn, sendToChat, shellQuote,
+  terminalCommand, waitForBranch,
 } from '../scripts/cloud.mjs';
-import { tempDir } from './helpers.mjs';
+import { makeRepo, run, tempDir } from './helpers.mjs';
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 process.env.PATH = `${FIXTURES}:${process.env.PATH}`;
@@ -105,4 +106,28 @@ test('history adds entries and survives a missing file', t => {
   recordHandoff({ branch: 'one' }, home);
   recordHandoff({ branch: 'two' }, home);
   assert.deepEqual(readHistory(home).map(entry => entry.branch), ['one', 'two']);
+});
+
+test('waiting for a branch sees it once it is on the remote', async t => {
+  const { root } = makeRepo(t);
+  const info = { root, remote: 'origin' };
+  assert.equal(await waitForBranch(info, 'skyhop-sync/x-pulse', 0), false);
+  run(root, 'push', '-q', 'origin', 'main:refs/heads/skyhop-sync/x-pulse');
+  assert.equal(await waitForBranch(info, 'skyhop-sync/x-pulse', 0), true);
+});
+
+test('a message to an existing chat reports what the CLI said', t => {
+  const dir = tempDir(t);
+  process.env.FAKE_CLAUDE_DIR = dir;
+  try {
+    assert.deepEqual(sendToChat('session_01Abc', 'hello'), { ok: true });
+    assert.equal(fs.readFileSync(path.join(dir, 'prompt'), 'utf8'), 'hello');
+    process.env.FAKE_CLAUDE_SEND = 'archived';
+    const refused = sendToChat('session_01Abc', 'hello');
+    assert.equal(refused.ok, false);
+    assert.match(refused.error, /archived/);
+  } finally {
+    delete process.env.FAKE_CLAUDE_SEND;
+    delete process.env.FAKE_CLAUDE_DIR;
+  }
 });

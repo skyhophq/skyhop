@@ -29,7 +29,7 @@ export function setup(t, options) {
     ...process.env, HOME: home, PATH: `${FIXTURES}:${process.env.PATH}`, FAKE_CLAUDE_DIR: repo.base,
     FAKE_CLAUDE_MODE: '', SKYHOP_LAUNCH_WAIT_MS: '5000', SKYHOP_LAUNCH_SETTLE_MS: '100',
     CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_PID: '4242', CLAUDE_CODE_REMOTE: '', SKYHOP_INNER: '',
-    SKYHOP_LOAD_MARGIN_MS: '0', ...extra,
+    SKYHOP_LOAD_MARGIN_MS: '0', SKYHOP_REOPEN_WAIT_MS: '0', FAKE_CLAUDE_SEND: '', ...extra,
   });
   const skyhop = (args, extra) => {
     const result = spawnSync('node', [SCRIPT, ...args], { cwd: repo.root, encoding: 'utf8', env: env(extra) });
@@ -43,7 +43,7 @@ export function setup(t, options) {
     assert.equal(result.status, 0, result.stderr);
     return result.stdout.trim() ? JSON.parse(result.stdout) : null;
   };
-  // Each handoff gets a fresh VM, as in the real cloud.
+  // A new chat gets a fresh VM, as in the real cloud.
   const handOff = (...flags) => {
     fs.rmSync(vm, { recursive: true, force: true });
     fs.rmSync(path.join(repo.base, 'vm-home'), { recursive: true, force: true });
@@ -51,22 +51,32 @@ export function setup(t, options) {
     assert.equal(result.status, 0, result.output);
     return vm;
   };
+  // A later handoff back to the same chat, whose VM is still running.
+  const handOffAgain = (extra, ...flags) => {
+    fs.rmSync(path.join(repo.base, 'sent-to'), { force: true });
+    const result = skyhop(['--brief', briefFile, '--session', SESSION, '--yes', ...flags], extra);
+    assert.equal(result.status, 0, result.output);
+    return result;
+  };
   // Runs the real relay in the fake VM, as the hook would. The first call sends the
   // handoff's first message, later calls send `prompt`.
   const cloudWork = (dir, { chat = CLOUD, code = true, prompt, check = true, busyCheck } = {}) => {
     const realHome = process.env.HOME;
     process.env.HOME = path.join(repo.base, 'vm-home');
     try {
-      const output = handlePrompt({
+      const resume = (_root, sessionId) => {
+        busyCheck?.();
+        fs.appendFileSync(path.join(process.env.HOME, '.claude/projects/skyhop-import', `${sessionId}.jsonl`), chat);
+        if (code) write(dir, typeof code === 'string' ? code : 'cloud-work.txt', 'made in the cloud\n');
+        return { status: 0, stdout: JSON.stringify({ type: 'result', result: 'done' }) };
+      };
+      // A reopened chat hands the message to the new handoff's relay. Here that runs
+      // in this process, with the same stand-in for the resumed session.
+      const relay = input => handlePrompt({ ...input, resume, rerun: relay });
+      const output = relay({
         prompt: prompt ?? fs.readFileSync(path.join(repo.base, 'prompt'), 'utf8'),
         hookMode: 'default',
         root: dir,
-        resume: (_root, sessionId) => {
-          busyCheck?.();
-          fs.appendFileSync(path.join(process.env.HOME, '.claude/projects/skyhop-import', `${sessionId}.jsonl`), chat);
-          if (code) write(dir, typeof code === 'string' ? code : 'cloud-work.txt', 'made in the cloud\n');
-          return { status: 0, stdout: JSON.stringify({ type: 'result', result: 'done' }) };
-        },
       });
       if (check) assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /could not save|Warning/);
       return output;
@@ -77,5 +87,5 @@ export function setup(t, options) {
   const remoteBranches = prefix => run(repo.bare, 'for-each-ref', '--format=%(refname:short)', `refs/heads/${prefix}`);
   const syncBranches = () => remoteBranches('skyhop-sync');
   const record = () => JSON.parse(fs.readFileSync(path.join(home, `.skyhop/sessions/${SESSION}.json`), 'utf8'));
-  return { ...repo, home, briefFile, vm, skyhop, hook, handOff, cloudWork, localSession, syncBranches, remoteBranches, record };
+  return { ...repo, home, briefFile, vm, skyhop, hook, handOff, handOffAgain, cloudWork, localSession, syncBranches, remoteBranches, record };
 }

@@ -5,9 +5,11 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { SkyhopError } from './git.mjs';
+import { SkyhopError, tryGit } from './git.mjs';
 
 const POLL_MS = 250;
+const BRANCH_POLL_MS = 5000;
+const SEND_TIMEOUT_MS = 120_000;
 
 export function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`;
@@ -125,6 +127,38 @@ export async function launchSession({ dir, prompt, env = {}, waitMs, settleMs })
   }
   if (outcome.url) return { status: 'started', url: outcome.url, sessionId: outcome.sessionId };
   return { status: 'unconfirmed', detail: outcome.text.trim().slice(-500) };
+}
+
+// Posts a message into a cloud chat that already exists. Claude Code queues it and
+// exits without waiting for the reply, and needs no terminal for this.
+export function sendToChat(sessionId, message) {
+  const run = spawnSync('claude', ['-p', '--cloud', sessionId, '--output-format', 'json'], {
+    input: message, encoding: 'utf8', timeout: SEND_TIMEOUT_MS,
+  });
+  let result = null;
+  try {
+    result = JSON.parse(run.stdout);
+  } catch {
+    result = null;
+  }
+  if (result?.ok) return { ok: true };
+  const error = String(result?.error || run.stderr || run.error?.message || '').trim().slice(0, 300);
+  return { ok: false, error: error || 'no answer from claude' };
+}
+
+// A cloud machine that was shut down for being idle has to start again first.
+export function reopenWaitMs() {
+  return Number(process.env.SKYHOP_REOPEN_WAIT_MS ?? 150_000);
+}
+
+// Waits for a branch to appear on the remote. True if it did.
+export async function waitForBranch(info, name, waitMs) {
+  const started = Date.now();
+  for (;;) {
+    if (tryGit(info.root, ['ls-remote', '--heads', info.remote, `refs/heads/${name}`])) return true;
+    if (Date.now() - started >= waitMs) return false;
+    await new Promise(resolve => setTimeout(resolve, Math.min(BRANCH_POLL_MS, waitMs)));
+  }
 }
 
 export function requireSignIn() {

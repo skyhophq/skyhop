@@ -14,6 +14,18 @@ if [ "$1" = "agents" ]; then
   exit 0
 fi
 
+# claude -p --cloud <id> --output-format json: posts a message into an existing chat.
+if [ "$1" = "-p" ] && [ "$2" = "--cloud" ]; then
+  if [ "$FAKE_CLAUDE_SEND" = "archived" ]; then
+    echo "{\"ok\":false,\"session_id\":\"$3\",\"error\":\"cloud session $3 is archived and cannot accept new messages\"}"
+    exit 1
+  fi
+  cat > "$FAKE_CLAUDE_DIR/prompt"
+  printf '%s' "$3" > "$FAKE_CLAUDE_DIR/sent-to"
+  echo "{\"ok\":true,\"session_id\":\"$3\",\"url\":\"https://claude.ai/code/$3\"}"
+  exit 0
+fi
+
 if [ "$1" = "--cloud" ]; then
   if ! [ -t 0 ]; then
     echo "Error: --cloud requires an interactive terminal."

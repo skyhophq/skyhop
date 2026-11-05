@@ -31,6 +31,7 @@ Skyhop needs Node.js 20 or later, git, and a claude.ai sign-in on a plan that in
 /skyhop --summary            Start a new cloud session from a brief instead
 /skyhop --dry-run            Show the plan and first message, and do nothing else
 /skyhop --name login-fix     Choose the branch name
+/skyhop --new-chat           Use a new cloud chat instead of this session's earlier one
 /skyhop-back                 Bring the session home right away, from another window
 /skyhop-back --dry-run       Show what would come back, and change nothing
 /skyhop-status               List sessions in the cloud, past handoffs and leftover branches
@@ -44,6 +45,7 @@ Skyhop needs Node.js 20 or later, git, and a claude.ai sign-in on a plan that in
 | `--yes` | Skips the confirmation |
 | `--summary` | Starts a new cloud session from a brief instead of moving this one. Before version 0.3.0 this was the default, and `--full-resume` chose the other mode. `--full-resume` still works |
 | `--mode M` | Sets the starting permission mode for full resume: `auto` (default), `acceptEdits` or `plan` |
+| `--new-chat` | Full resume only. Starts a new cloud chat even if this session already has one |
 | `--no-sync` | Full resume only. Pushes nothing to GitHub and uploads directly instead, so `/skyhop-back` has nothing to bring home |
 | `--allow-secrets` | Continues even though the secret scan found something |
 
@@ -93,7 +95,11 @@ Coming home takes no command, and it's always the same session:
 3. **Type `/resume` and pick the session.** It's at the top, with the cloud messages inside.
 4. **Send a message.** That brings the session home for good: the cloud chat closes, and the cloud's code arrives in your files.
 
-To hand it off again later, run `/skyhop` in it again. The session keeps its ID through every round trip.
+To hand it off again later, run `/skyhop` in it again. The session keeps its ID through every round trip, and **it goes back to the same cloud chat**, so each session has one chat in the cloud too. Skyhop pushes the new handoff to that chat's branch and sends the chat a message, which switches it over to the new handoff. You'll see that message in the chat, with a recap, and the reply carries on from your latest work on the Mac.
+
+- **If the chat was archived or deleted,** Skyhop starts a new one.
+- **If the chat's cloud machine was shut down for being idle,** it has to start again first, which can take a few minutes. If the chat can't reconnect, it says so, and `/skyhop --new-chat` starts a new chat.
+- **Chats started before version 0.5.0 can't switch over,** so the first handoff after updating starts a new chat, and later ones reuse it.
 
 | What comes back | Where it goes |
 | --- | --- |
@@ -146,6 +152,7 @@ Skyhop keeps its files in `~/.skyhop/`: briefs, a history of handoffs, the keys 
 - If the Claude GitHub App isn't installed on your repository, `--cloud` uploads it directly instead of cloning, and that session can't push. Full resume still works, but each reply warns that nothing is being saved for your machine.
 - The desktop app groups cloud sessions by their GitHub repo, so a handoff from a repo you have open in the app appears under that project. A session uploaded directly has no repo link and appears under **Cloud**. That happens with `--no-sync`, with no remote, or when the Claude GitHub App isn't set up on the repo.
 - If Skyhop can't take its commit out of git history in the VM, it warns you in the chat. Don't push that branch.
+- Going back to a chat has been tested while its cloud machine was still running, two hours after the last message. Going back after the machine has been shut down for being idle is untested. Skyhop then relies on the new machine starting from the chat's branch.
 
 ## Development
 

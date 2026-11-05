@@ -164,14 +164,15 @@ test('when both sides kept going, the cloud part becomes its own session', t => 
 });
 
 test('a second round trip keeps the one session', t => {
-  const { root, hook, handOff, cloudWork, localSession } = setup(t);
+  const { root, vm, hook, handOff, handOffAgain, cloudWork, localSession } = setup(t);
   cloudWork(handOff());
   hook('start', start);
   hook('start', resume);
   hook('prompt', prompt);
   fs.appendFileSync(localSession, TYPED_HERE);
 
-  cloudWork(handOff(), { chat: CLOUD2, code: 'more-cloud-work.txt' });
+  handOffAgain();
+  cloudWork(vm, { chat: CLOUD2, code: 'more-cloud-work.txt' });
   hook('start', start);
   hook('start', resume);
   assert.match(hook('prompt', prompt).systemMessage, /back from the cloud/);

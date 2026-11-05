@@ -241,12 +241,87 @@ function saveQuietly(root, transcript, busy) {
 
 const GITHUB = { check: cloudState, busy: markBusy };
 
+export const REOPEN_PATTERN = /\[skyhop-reopen:([\w./-]+)\]/;
+
+function readSyncConfig(root) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(root, '.skyhop/sync.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function readSessionId(root) {
+  try {
+    return fs.readFileSync(path.join(root, '.skyhop/session-id'), 'utf8').trim();
+  } catch {
+    return null;
+  }
+}
+
+// A later handoff of the same session comes back to this chat. The Mac pushed it to
+// this chat's start branch, so the VM swaps its files for the new handoff's, and the
+// message is then handled as a first message, by the new handoff's relay. Untracked
+// files left from before go too, or files deleted on the Mac would come back with
+// the next save. Sensitive files stay, because they never leave the VM anyway.
+export function prepareReopen(root, prompt) {
+  const runBranch = prompt.match(REOPEN_PATTERN)[1];
+  const hasOrigin = gitIn(root, ['remote', 'get-url', 'origin']).status === 0;
+  const targets = [...(hasOrigin ? ['origin'] : []), readSyncConfig(root)?.remoteUrl].filter(Boolean);
+  const fetched = targets.some(target => gitIn(root, ['fetch', '-q', '--no-tags', target, `refs/heads/${runBranch}`]).status === 0);
+  if (!fetched) return { error: `the new handoff on ${runBranch} could not be downloaded` };
+  if (!gitIn(root, ['log', '-1', '--format=%B', 'FETCH_HEAD']).stdout.includes(RELAY_COMMIT_MARKER)) {
+    return { error: `${runBranch} does not hold a Skyhop handoff` };
+  }
+
+  const oldSession = readSessionId(root);
+  gitIn(root, ['update-index', '--no-skip-worktree', '.claude/settings.json']);
+  fs.rmSync(path.join(root, '.skyhop'), { recursive: true, force: true });
+  if (gitIn(root, ['checkout', '-q', '-f', '-B', 'skyhop-reopen', 'FETCH_HEAD']).status !== 0) {
+    return { error: 'this VM could not switch to the new handoff' };
+  }
+  const leftovers = gitIn(root, ['ls-files', '--others', '--exclude-standard', '-z']).stdout.split('\0').filter(Boolean);
+  for (const file of leftovers) {
+    if (!isSensitivePath(file)) fs.rmSync(path.join(root, file), { force: true });
+  }
+  // The VM's copy of the conversation is replaced by the one in the new handoff.
+  for (const id of new Set([oldSession, readSessionId(root)].filter(Boolean))) {
+    fs.rmSync(path.join(os.homedir(), '.claude/projects/skyhop-import', `${id}.jsonl`), { force: true });
+  }
+  return { prompt: prompt.replace(REOPEN_PATTERN, '').trim() };
+}
+
+function reopenFailed(detail) {
+  return contextOutput(`Skyhop could not reconnect this chat to the session (${detail}). Tell the user that in one line, and that running /skyhop --new-chat on their computer starts a new chat instead. Do nothing else.`);
+}
+
+// Runs the new handoff's relay as its own process, so its code is the one in charge.
+function rerunRelay({ prompt, hookMode, root, chatTranscript }) {
+  const run = spawnSync('node', [path.join(root, '.skyhop', 'relay.mjs')], {
+    cwd: root,
+    input: JSON.stringify({ prompt, permission_mode: hookMode, transcript_path: chatTranscript }),
+    encoding: 'utf8',
+    timeout: INNER_TIMEOUT_MS + 60_000,
+    maxBuffer: MAX_INNER_OUTPUT,
+    env: { ...process.env, CLAUDE_PROJECT_DIR: root },
+  });
+  try {
+    return JSON.parse(run.stdout);
+  } catch {
+    return reopenFailed(`the new relay gave no answer: ${String(run.stderr || run.error?.message || '').trim().slice(0, ERROR_TEXT_LIMIT)}`);
+  }
+}
+
 // Returns the hook's JSON output, or null to let the outer session handle the message.
 export function handlePrompt({
-  prompt: rawPrompt, hookMode, root, chatTranscript, resume = runResume, save = saveQuietly, github = GITHUB,
+  prompt: rawPrompt, hookMode, root, chatTranscript, resume = runResume, save = saveQuietly, github = GITHUB, rerun = rerunRelay,
 }) {
   const marker = name => path.join(root, '.skyhop', name);
   const output = text => relayOutput(text, long => saveLongReply(root, long));
+  if (REOPEN_PATTERN.test(rawPrompt)) {
+    const next = prepareReopen(root, rawPrompt);
+    return next.error ? reopenFailed(next.error) : rerun({ prompt: next.prompt, hookMode, root, chatTranscript });
+  }
   if (fs.existsSync(marker('fallback'))) return null;
   if (fs.existsSync(marker('home'))) return output(HOME_NOTE);
 

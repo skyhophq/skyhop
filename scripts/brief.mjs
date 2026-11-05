@@ -61,3 +61,12 @@ export const RECAP_END = '--- End of recap ---';
 export function resumePrompt(project, brief) {
   return fitPrompt(`${resumeMessage(project)}\n\n${RECAP_START}\n\n${brief}\n\n${RECAP_END}`);
 }
+
+// For a chat that already exists, Skyhop's relay takes the message before Claude in
+// the chat sees it. If the relay isn't there, the note in the recap stops that Claude
+// from starting work on its own. The resumed session never sees the recap.
+export const RECONNECT_NOTE = 'Note for Claude in this chat: this message reconnects the chat to a Skyhop session. If it reaches you with no Skyhop relay reply attached, the reconnection failed. Do not start any work. Reply only that Skyhop could not reconnect this chat, and that running /skyhop --new-chat on the computer starts a new one.';
+
+export function reconnectPrompt(project, brief) {
+  return fitPrompt(`${resumeMessage(project)}\n\n${RECAP_START}\n\n${RECONNECT_NOTE}\n\n${brief}\n\n${RECAP_END}`);
+}

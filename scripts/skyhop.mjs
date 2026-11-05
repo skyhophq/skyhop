@@ -5,17 +5,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
-import { bringBack, saveHandoffRecord, waitingRecords } from './back.mjs';
-import { briefPrompt, loadBrief, redactPaths, resumePrompt } from './brief.mjs';
-import { launchSession, launchTimes, pasteCommand, readHistory, recordHandoff, requireSignIn } from './cloud.mjs';
+import { bringBack, readRecord, saveHandoffRecord, waitingRecords } from './back.mjs';
+import { briefPrompt, loadBrief, reconnectPrompt, redactPaths, resumePrompt } from './brief.mjs';
+import {
+  launchSession, launchTimes, pasteCommand, readHistory, recordHandoff, reopenWaitMs, requireSignIn, sendToChat, waitForBranch,
+} from './cloud.mjs';
 import { addRelayCommit, findTranscript, LARGE_TRANSCRIPT_BYTES, measureUpload } from './fullresume.mjs';
 import {
   createSnapshot, git, maskUrl, pendingCommitCount, pendingDiff, prepareLaunchFolder, publicRemoteUrl,
-  pushBranch, removeLaunchFolder, repoBytes, repoInfo, skyhopBranch, SkyhopError, snapshotStat,
+  pushBranch, removeLaunchFolder, repoBytes, repoInfo, skyhopBranch, SkyhopError, snapshotStat, tryGit,
 } from './git.mjs';
 import { findLeftovers, formatLeftovers, removeLeftovers } from './leftovers.mjs';
 import { formatFinding, isSensitivePath, scanDiff, scanText } from './secrets.mjs';
-import { newKey } from './sync.mjs';
+import { newKey, pulseRef } from './sync.mjs';
 
 const MODES = ['auto', 'acceptEdits', 'plan'];
 const EXIT_NEEDS_CONFIRMATION = 2;
@@ -42,10 +44,11 @@ function readOptions(args) {
         back: { type: 'boolean', default: false },
         clean: { type: 'boolean', default: false },
         'no-sync': { type: 'boolean', default: false },
+        'new-chat': { type: 'boolean', default: false },
       },
     }).values;
   } catch (error) {
-    throw new SkyhopError(error.message, 'Flags are --summary, --name, --dry-run, --yes, --mode, --no-sync and --allow-secrets.');
+    throw new SkyhopError(error.message, 'Flags are --summary, --name, --dry-run, --yes, --mode, --no-sync, --new-chat and --allow-secrets.');
   }
   if (!MODES.includes(parsed.mode)) throw new SkyhopError(`Unknown mode: ${parsed.mode}`, `Use one of: ${MODES.join(', ')}.`);
   if (parsed.summary && parsed['full-resume']) throw new SkyhopError('--summary and --full-resume ask for different handoffs.', 'Use one of them.');
@@ -58,7 +61,7 @@ function syncEnabled(info, options) {
   return Boolean(info.remoteUrl) && !options['no-sync'];
 }
 
-function printPlan({ info, branch, snapshot, pending, options, transcript }) {
+function printPlan({ info, branch, snapshot, pending, options, transcript, reuse }) {
   const fullResume = options['full-resume'];
   const lines = [
     'Skyhop plan',
@@ -76,7 +79,8 @@ function printPlan({ info, branch, snapshot, pending, options, transcript }) {
         ? [
           `  Upload:     your code and the session transcript (${(transcript.bytes / 1e6).toFixed(1)} MB, encrypted) are pushed to a skyhop-run branch on ${info.remote}`,
           '              The key to the transcript goes only in the first message of the cloud session.',
-          `  Sync:       after each reply, the cloud session pushes your code and the encrypted conversation to skyhop-sync branches on ${info.remote}, for /skyhop-back`,
+          `  Sync:       after each reply, the cloud session pushes your code and the encrypted conversation to skyhop-sync branches on ${info.remote}, so the session can come home`,
+          `  Cloud chat: ${reuse ? `back to this session's earlier chat, ${reuse.url}` : 'a new chat'}`,
         ]
         : [
           `  Upload:     the snapshot, possibly your other local branches, and the full session transcript (${(transcript.bytes / 1e6).toFixed(1)} MB, about ${(transcript.compressed / 1e6).toFixed(1)} MB compressed), sent directly to the session`,
@@ -161,6 +165,26 @@ function reportLaunch({ outcome, command, record, synced }) {
   return 0;
 }
 
+// The chat's last start branch is normally gone, because coming home deletes it.
+// One left behind belongs to this session's closed chat, so it can go.
+function clearOldStart(info, name) {
+  if (tryGit(info.root, ['ls-remote', '--heads', info.remote, `refs/heads/${name}`])) {
+    git(info.root, ['push', '-q', info.remote, '--delete', name]);
+  }
+}
+
+// The relay marks itself busy as soon as it takes the message, which shows the
+// chat picked up the handoff.
+async function reportReconnect({ info, reuse, record, ackBranch }) {
+  const picked = await waitForBranch(info, ackBranch, reopenWaitMs());
+  recordHandoff({ ...record, status: picked ? 'reconnected' : 'sent to earlier chat', sessionId: reuse.sessionId, url: reuse.url });
+  console.log(picked
+    ? `\nBack in this session's earlier cloud chat: ${reuse.url}\nIt picked up the handoff and is replying there now.`
+    : `\nSent to this session's earlier cloud chat: ${reuse.url}\nIt hasn't picked the handoff up yet, probably because its cloud machine is starting again, which can take a few minutes. If the chat says Skyhop couldn't reconnect, run /skyhop --new-chat.`);
+  console.log(`\n${COMING_HOME}`);
+  return 0;
+}
+
 async function handoff(options) {
   const fullResume = options['full-resume'];
   const info = repoInfo(process.cwd());
@@ -173,6 +197,16 @@ async function handoff(options) {
   const transcript = fullResume ? findTranscript(options.session) : null;
   const project = path.basename(info.root);
   const useSync = fullResume && syncEnabled(info, options);
+  const earlier = useSync ? readRecord(options.session) : null;
+  if (earlier?.sync && !earlier.broughtBackAt) {
+    throw new SkyhopError(
+      'This session is still in the cloud from its last handoff, so nothing was changed.',
+      'Send any message in this session first, which brings it home, then run /skyhop again.',
+    );
+  }
+  // A session that came home goes back to the chat it used last time, if that
+  // chat's relay can switch to a new handoff.
+  const reuse = !options['new-chat'] && earlier?.cloud?.reopen ? earlier.cloud : null;
   const prompt = fullResume ? resumePrompt(project, brief) : briefPrompt(brief, project);
   const branch = chooseBranch(options, info);
   const snapshot = createSnapshot(info, {
@@ -183,7 +217,7 @@ async function handoff(options) {
   const repoSize = fullResume && !useSync ? repoBytes(info.root, snapshot.sha) : 0;
   if (fullResume && !useSync) transcript.compressed = measureUpload(transcript, repoSize);
 
-  printPlan({ info, branch, snapshot, pending, options, transcript });
+  printPlan({ info, branch, snapshot, pending, options, transcript, reuse });
 
   const findings = findSecrets({ info, snapshot, prompt, transcript });
   if (findings.length > 0) {
@@ -197,7 +231,7 @@ async function handoff(options) {
   }
 
   if (options['dry-run']) {
-    console.log(`\nDry run: nothing was pushed or started.\n\n--- First prompt ---\n${prompt}`);
+    console.log(`\nDry run: nothing was pushed or started.\n\n--- First prompt ---\n${reuse ? reconnectPrompt(project, brief) : prompt}`);
     return 0;
   }
   if (!options.yes) {
@@ -213,12 +247,16 @@ async function handoff(options) {
 
   if (!fullResume) pushBranch(info, snapshot.sha, branch);
   const tail = branch.slice('skyhop/'.length);
-  const startBranch = useSync ? `skyhop-run/${tail}` : branch;
+  // A reused chat keeps its start branch and key, so a cloud machine that has to
+  // start again finds the new handoff where it found the first one.
+  const startBranch = useSync ? reuse?.runBranch ?? `skyhop-run/${tail}` : branch;
+  if (reuse) clearOldStart(info, startBranch);
   const dir = prepareLaunchFolder(info, snapshot.sha, startBranch);
   const env = fullResume && !useSync ? { CCR_FORCE_BUNDLE: '1' } : {};
-  const key = useSync ? newKey() : null;
+  const key = useSync ? reuse?.key ?? newKey() : null;
   const firstMessage = key ? `${prompt}\n\n[skyhop-key:${key}]` : prompt;
   const promptFile = savePrompt(options.brief, firstMessage);
+  let handoffRecord = null;
   if (fullResume) {
     const sync = useSync
       ? {
@@ -227,10 +265,11 @@ async function handoff(options) {
       }
       : null;
     const baseBytes = addRelayCommit(dir, { transcript, sessionId: options.session, mode: options.mode, brief, sync, key });
-    saveHandoffRecord({
+    handoffRecord = {
       sessionId: options.session, repoRoot: info.root, at: new Date().toISOString(), branch, baseBytes,
       head: info.head, snapshotTree: snapshot.tree, sync: sync && { ...sync, key },
-    });
+    };
+    saveHandoffRecord(handoffRecord);
     if (useSync) pushBranch(info, git(dir, ['rev-parse', 'HEAD']), startBranch);
   }
 
@@ -242,9 +281,22 @@ async function handoff(options) {
     mode: fullResume ? 'full resume' : 'summary handoff',
     pushed: !fullResume || useSync,
   };
+  if (reuse) {
+    const reconnect = `${reconnectPrompt(project, brief)}\n\n[skyhop-key:${key}]\n[skyhop-reopen:${startBranch}]`;
+    const sent = sendToChat(reuse.sessionId, reconnect);
+    if (sent.ok) {
+      removeLaunchFolder(info);
+      saveHandoffRecord({ ...handoffRecord, cloud: reuse });
+      return reportReconnect({ info, reuse, record, ackBranch: pulseRef(handoffRecord.sync.chatRef) });
+    }
+    console.log(`\nThis session's earlier cloud chat couldn't take the handoff (${sent.error}), so Skyhop is starting a new chat.`);
+  }
   try {
     const outcome = await launchSession({ dir, prompt: firstMessage, env, ...launchTimes(fullResume && !useSync ? transcript.compressed + repoSize : 0) });
     if (outcome.status !== 'needs-terminal') removeLaunchFolder(info);
+    if (useSync && outcome.status === 'started') {
+      saveHandoffRecord({ ...handoffRecord, cloud: { sessionId: outcome.sessionId, url: outcome.url, runBranch: startBranch, key, reopen: true } });
+    }
     return reportLaunch({ outcome, command, record, synced: useSync });
   } catch (error) {
     if (error instanceof SkyhopError) {
