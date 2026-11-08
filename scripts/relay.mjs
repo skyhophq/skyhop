@@ -8,6 +8,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  cloudLog, cloudLogFile, readLogTail, skyhopVersion,
+} from './log.mjs';
 import { isSensitivePath, scanDiff } from './secrets.mjs';
 import {
   cloudState, KEY_PATTERN, markBusy, openTranscript, readKey, restoreProgress, saveProgress,
@@ -29,6 +32,9 @@ const STEP_TEXT_LIMIT = 70;
 const ERROR_TEXT_LIMIT = 1500;
 const CONTEXT_LIMIT = 9000;
 const READ_CHUNK_BYTES = 1024 * 1024;
+// How much of the VM's log goes home with each save, and how much `skyhop log` shows.
+const LOG_UPLOAD_BYTES = 64 * 1024;
+const LOG_LINES_SHOWN = 40;
 
 const SCRUB_WARNING = 'Warning: Skyhop could not remove the session transcript from git in this VM. Do not push this branch.';
 export const HOME_NOTE = 'This session has gone back to your computer, so Skyhop no longer passes messages from this chat to it, and nothing sent here is saved. To work in the cloud again, run /skyhop on your computer.';
@@ -322,7 +328,8 @@ function restoreTranscript(root, sessionId) {
     const plain = path.join(root, '.skyhop/session.jsonl');
     if (fs.existsSync(plain)) fs.copyFileSync(plain, dest);
     else decryptTranscript(root, dest);
-    restoreProgress({ root, transcript: dest });
+    const restored = restoreProgress({ root, transcript: dest });
+    cloudLog(root, 'session set up', { 'saved-progress': restored ? 'restored from GitHub' : 'none' });
   }
   return dest;
 }
@@ -383,9 +390,20 @@ export function isStopRequest(prompt) {
   return /^skyhop stop$/i.test(prompt.trim());
 }
 
+export function isLogRequest(prompt) {
+  return /^skyhop log$/i.test(prompt.trim());
+}
+
+function logText(root) {
+  const lines = readLogTail(cloudLogFile(root), LOG_UPLOAD_BYTES).trim().split('\n').filter(Boolean).slice(-LOG_LINES_SHOWN);
+  if (lines.length === 0) return 'Skyhop has not logged anything on this cloud machine yet.';
+  return `Skyhop's log on this cloud machine, last ${lines.length} line(s):\n\n\`\`\`\n${lines.join('\n')}\n\`\`\``;
+}
+
 function saveQuietly(root, transcript, busy) {
   try {
-    return saveProgress({ root, transcript, isExcluded: isSensitivePath, scan: scanDiff, busy });
+    const log = readLogTail(cloudLogFile(root), LOG_UPLOAD_BYTES) || null;
+    return saveProgress({ root, transcript, isExcluded: isSensitivePath, scan: scanDiff, busy, log });
   } catch (error) {
     return `Skyhop could not save this message for /skyhop-back. (${error.message})`;
   }
@@ -467,6 +485,10 @@ export function jobStatus(root) {
   return alive ? 'running' : 'lost';
 }
 
+function minutesSince(start) {
+  return start ? ((Date.now() - start) / 60_000).toFixed(1) : null;
+}
+
 function finishJob(root, result) {
   writeJson(jobFile(root, 'result.json'), result);
 }
@@ -511,22 +533,33 @@ export function runJob(root, { resume = runResume, save = saveQuietly, github = 
   const marker = name => path.join(root, '.skyhop', name);
   const prompt = fs.readFileSync(jobFile(root, 'prompt.txt'), 'utf8');
 
+  // The log gets the outcome, never the reply or the events, which hold the conversation.
+  const ended = fields => cloudLog(root, 'job end', { minutes: minutesSince(job.startedAt), ...fields });
   let run;
   let reply;
   try {
     run = resume(root, job.sessionId, job.mode, prompt, jobFolder(root));
     if (run.error?.code === 'ETIMEDOUT') {
       reply = 'The resumed session ran out of time on this message. Its work so far is saved, so send a message to carry on.';
+      ended({ outcome: 'timed out' });
     } else {
       const { result, steps } = typeof run.stdout === 'string' ? parseRun(run.stdout) : parseRunFile(run.eventsFile);
       reply = result.is_error
         ? `The resumed session reported an error: ${String(result.result).slice(0, ERROR_TEXT_LIMIT)}`
         : formatReply(result, job.mode, steps);
+      ended(result.is_error
+        ? { outcome: 'session error', error: String(result.result) }
+        : { outcome: 'reply', steps: steps.length, chars: reply.length, denied: result.permission_denials?.length || null });
       fs.writeFileSync(marker('resumed'), '');
     }
   } catch (error) {
     const events = run?.eventsFile ? readTail(run.eventsFile, ERROR_TEXT_LIMIT) : run?.stdout;
     const detail = String(run?.stderr || events || run?.error?.message || error.message).trim().slice(-ERROR_TEXT_LIMIT);
+    ended({
+      outcome: job.isFirstMessage ? 'could not resume, falling back to the brief' : 'failed',
+      exit: run?.status ?? 'none',
+      error: String(run?.stderr || run?.error?.message || error.message).trim().slice(-ERROR_TEXT_LIMIT),
+    });
     if (job.isFirstMessage) {
       fs.writeFileSync(marker('fallback'), '');
       finishJob(root, { kind: 'fallback', text: fallbackText(detail) });
@@ -539,8 +572,10 @@ export function runJob(root, { resume = runResume, save = saveQuietly, github = 
   if (job.open && github.check(root).state === 'closed') {
     fs.writeFileSync(marker('home'), '');
     saveWarning = HOME_DURING_REPLY;
+    cloudLog(root, 'went home during the reply, so it was not saved');
   } else {
     saveWarning = save(root, job.transcript, job.busy);
+    cloudLog(root, saveWarning ? 'save problem' : 'saved', { warning: saveWarning });
   }
   const debug = fs.existsSync(marker('debug')) ? `[skyhop-relay hook=${job.hookMode} used=${job.mode}]` : null;
   const parts = [debug, job.lostNote, job.warning, reply, saveWarning].filter(Boolean);
@@ -612,11 +647,16 @@ export function replyNow(root) {
   if (status === 'none') return 'SKYHOP-NONE: no Skyhop message is running. Stop here, and do not write anything more.';
   if (status === 'delivered') return 'SKYHOP-NONE: this reply was already given above. Stop here, and do not write anything more.';
   if (status === 'running') return workingText(root);
-  if (status === 'lost') finishJob(root, { kind: 'reply', text: 'The resumed session stopped before it finished this message, so there is no reply. Anything it saved is kept. Send a message to carry on.' });
+  if (status === 'lost') {
+    const lost = readJob(root);
+    cloudLog(root, 'job lost', { reason: lost.boot !== bootId() ? 'the machine restarted' : 'the process is gone', minutes: minutesSince(lost.startedAt) });
+    finishJob(root, { kind: 'reply', text: 'The resumed session stopped before it finished this message, so there is no reply. Anything it saved is kept. Send a message to carry on.' });
+  }
 
   const job = readJob(root);
   const result = readJson(jobFile(root, 'result.json'));
   updateJob(root, { delivered: true });
+  cloudLog(root, 'reply shown', { kind: result.kind, minutes: minutesSince(job.startedAt), resend: job.resend ? 'asked' : null });
   if (result.kind === 'fallback') return `SKYHOP-FALLBACK: ${result.text}`;
   return replyText(root, result.text, job.resend ? ` ${RESEND_NOTE}` : '');
 }
@@ -703,16 +743,26 @@ export function handlePrompt({
   const output = text => relayOutput(text, long => saveLongReply(root, long));
   if (REOPEN_PATTERN.test(rawPrompt)) {
     const next = prepareReopen(root, rawPrompt);
+    cloudLog(root, next.error ? 'reconnect failed' : 'reconnected to a new handoff', { branch: rawPrompt.match(REOPEN_PATTERN)[1], error: next.error });
     return next.error ? reopenFailed(next.error) : rerun({ prompt: next.prompt, hookMode, root, chatTranscript });
   }
-  if (fs.existsSync(marker('fallback'))) return null;
-  if (fs.existsSync(marker('home'))) return output(HOME_NOTE);
+  if (isLogRequest(rawPrompt)) return output(logText(root));
+  if (fs.existsSync(marker('fallback'))) {
+    cloudLog(root, 'message left to the chat, which works from the brief');
+    return null;
+  }
+  if (fs.existsSync(marker('home'))) {
+    cloudLog(root, 'message after the session went home');
+    return output(HOME_NOTE);
+  }
 
   const prompt = storeKey(root, rawPrompt, chatTranscript);
   const warning = scrubRelayCommit(root);
   if (isStopRequest(prompt)) {
     const job = readJob(root);
-    if (!stopJob(root)) return output(NOTHING_TO_STOP);
+    const stopped = stopJob(root);
+    cloudLog(root, 'stop', { result: stopped ? 'stopped the running message' : 'nothing was running' });
+    if (!stopped) return output(NOTHING_TO_STOP);
     // What the session did before it stopped is saved now, in case the user goes home.
     const wentHome = job.open && github.check(root).state === 'closed';
     const text = [STOPPED_NOTE, wentHome ? null : save(root, job.transcript, job.busy)].filter(Boolean).join('\n\n');
@@ -723,15 +773,20 @@ export function handlePrompt({
   const requestedMode = modeRequest(prompt);
   if (requestedMode) {
     fs.writeFileSync(marker('mode'), `${requestedMode}\n`);
+    cloudLog(root, 'mode', { mode: requestedMode });
     return output(`Permission mode is now ${requestedMode}.`);
   }
 
   const status = jobStatus(root);
-  if (status === 'running' || status === 'done') return busyOutput(root, status);
+  if (status === 'running' || status === 'done') {
+    cloudLog(root, 'message while the last one was unfinished, not passed on', { job: status });
+    return busyOutput(root, status);
+  }
 
   const before = github.check(root);
   if (before.state === 'closed') {
     fs.writeFileSync(marker('home'), '');
+    cloudLog(root, 'the session went home');
     return output(HOME_NOTE);
   }
   const busy = before.state === 'open' ? github.busy(root, before) : null;
@@ -745,6 +800,7 @@ export function handlePrompt({
     transcript = restoreTranscript(root, sessionId);
     trimPartialLine(transcript, savedBytes(root));
   } catch (error) {
+    cloudLog(root, 'could not open the session', { first: isFirstMessage ? 'yes' : 'no', error: error.message });
     if (isFirstMessage) {
       fs.writeFileSync(marker('fallback'), '');
       return fallbackOutput(error.message.slice(0, ERROR_TEXT_LIMIT));
@@ -768,9 +824,23 @@ export function handlePrompt({
     startedAt: Date.now(),
     boot: bootId(),
   });
+  cloudLog(root, 'job start', {
+    first: isFirstMessage ? 'yes' : null,
+    version: isFirstMessage ? skyhopVersion() : null,
+    node: isFirstMessage ? process.version : null,
+    mode,
+    'chat-mode': hookMode,
+    github: before.state,
+    busy: before.state === 'open' ? (busy ? 'marked' : 'could not mark') : null,
+    previous: status === 'lost' ? 'lost' : null,
+    boot: bootId()?.slice(0, 8),
+  });
   const pid = start(root);
   if (pid) updateJob(root, { pid });
-  else if (jobStatus(root) === 'lost') finishJob(root, { kind: 'reply', text: 'Skyhop could not start the resumed session in this VM. Send your message again to retry.' });
+  else if (jobStatus(root) === 'lost') {
+    cloudLog(root, 'job could not start');
+    finishJob(root, { kind: 'reply', text: 'Skyhop could not start the resumed session in this VM. Send your message again to retry.' });
+  }
   return waitContext('the user\'s message was passed to the resumed session, which is working on it in the background.');
 }
 
@@ -786,6 +856,7 @@ async function main() {
     try {
       runJob(scriptRoot);
     } catch (error) {
+      cloudLog(scriptRoot, 'job crashed', { error: error.message });
       finishJob(scriptRoot, { kind: 'reply', text: `Skyhop relay failed: ${String(error.message).slice(0, ERROR_TEXT_LIMIT)}` });
     }
     return;
@@ -802,7 +873,13 @@ async function main() {
   const { prompt, permission_mode: hookMode, transcript_path: chatTranscript } = JSON.parse(input);
   const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 
-  const output = handlePrompt({ prompt, hookMode, root, chatTranscript });
+  let output;
+  try {
+    output = handlePrompt({ prompt, hookMode, root, chatTranscript });
+  } catch (error) {
+    cloudLog(root, 'hook error', { error: error.message });
+    throw error;
+  }
   if (output) console.log(JSON.stringify(output));
 }
 

@@ -89,11 +89,12 @@ test('broken settings give a clear error', () => {
 test('the relay commit carries everything the VM needs', t => {
   const { root } = relayRepo(t);
   const files = run(root, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n');
-  for (const file of ['.skyhop/session.jsonl', '.skyhop/relay.mjs', '.skyhop/session-id', '.skyhop/mode', '.skyhop/brief.md', '.claude/settings.json']) {
+  for (const file of ['.skyhop/session.jsonl', '.skyhop/relay.mjs', '.skyhop/log.mjs', '.skyhop/session-id', '.skyhop/mode', '.skyhop/version', '.skyhop/brief.md', '.claude/settings.json']) {
     assert.ok(files.includes(file), file);
   }
   assert.match(run(root, 'log', '-1', '--format=%B'), new RegExp(RELAY_COMMIT_MARKER));
   assert.equal(run(root, 'show', 'HEAD:.skyhop/mode'), 'auto');
+  assert.match(run(root, 'show', 'HEAD:.skyhop/version'), /^\d+\.\d+\.\d+$/);
 });
 
 test('the relay commit is added even when .claude is gitignored', t => {

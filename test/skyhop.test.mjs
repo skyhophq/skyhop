@@ -348,3 +348,42 @@ test('status lists handoffs newest first', t => {
   assert.ok(output.indexOf('skyhop/second') < output.indexOf('skyhop/first'));
   assert.match(output, /https:\/\/claude\.ai\/code\/session_01FakeSessionForTests/);
 });
+
+test('the log records each handoff step, and never the secret or the brief', t => {
+  const { root, home, skyhop } = setup(t);
+  write(root, 'config.js', `const key = "${FAKE_TOKEN}";\n`);
+  assert.equal(skyhop(['--yes']).status, 1);
+  const text = fs.readFileSync(path.join(home, '.skyhop/logs/skyhop.log'), 'utf8');
+  assert.match(text, / handoff start version=\S+ node=v[\d.]+ os="\w+ [^"]+" mode=summary flags=yes\n/);
+  assert.match(text, / handoff plan repo=repo remote=yes changed=1 unpushed=0\n/);
+  assert.match(text, / handoff secret scan found=1 rules="GitHub token"\n/);
+  assert.match(text, / handoff stopped error="Stopped because of the likely secrets above\. Nothing left this machine\."\n/);
+  assert.ok(!text.includes(FAKE_TOKEN));
+  assert.doesNotMatch(text, /Ship it/);
+});
+
+test('status points to the logs once there are any', t => {
+  const { skyhop } = setup(t);
+  assert.doesNotMatch(skyhop(['--status']).output, /skyhop\/logs/);
+  skyhop(['--dry-run']);
+  assert.match(skyhop(['--status']).output, /Skyhop's logs are in ~\/\.skyhop\/logs\//);
+});
+
+test('with Remote Control on, the plan and the first cloud message link to the whole conversation', t => {
+  const { base, home, skyhop } = setup(t);
+  addTranscript(home, '{"type":"user","message":{"content":"hi"}}\n{"type":"bridge-session","sessionId":"s","bridgeSessionId":"cse_01AbcdefghijKLmn","lastSequenceNum":0}\n');
+  const result = skyhop(['--full-resume', '--yes']);
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /History:\s+the cloud chat links to your whole conversation, in this session's Remote Control entry: https:\/\/claude\.ai\/code\/session_01AbcdefghijKLmn/);
+  assert.match(fs.readFileSync(path.join(base, 'prompt'), 'utf8'), /--- Where we left off[^\n]*\n\nYour whole conversation from your computer[^\n]*session_01AbcdefghijKLmn\n\n## Goal/);
+  assert.match(fs.readFileSync(path.join(home, '.skyhop/logs/skyhop.log'), 'utf8'), / history="remote control link"/);
+});
+
+test('without Remote Control, the plan says how to get the link next time', t => {
+  const { base, home, skyhop } = setup(t);
+  addTranscript(home);
+  const result = skyhop(['--full-resume', '--yes']);
+  assert.match(result.output, /History:\s+the cloud chat starts with a recap\. For a link to your whole conversation there, turn on Remote Control first/);
+  assert.doesNotMatch(fs.readFileSync(path.join(base, 'prompt'), 'utf8'), /Remote Control entry/);
+});
+

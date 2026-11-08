@@ -33,6 +33,11 @@ function chunkName(seq) {
   return `chunks/${String(seq).padStart(6, '0')}.enc`;
 }
 
+// The VM's Skyhop log travels with the conversation, encrypted the same way, so a
+// bug report from the Mac can include what happened in the cloud.
+const LOG_NAME = 'log.enc';
+const LOG_SEQ = 'log';
+
 export function sealChunk({ from, to, bytes }, key, seq) {
   const plain = zlib.gzipSync(Buffer.concat([Buffer.from(`${JSON.stringify({ from, to })}\n`), bytes]));
   const iv = crypto.randomBytes(IV_BYTES);
@@ -103,13 +108,15 @@ function newLines(file, from) {
   return end < 0 ? null : { from, to: from + end + 1, bytes: bytes.subarray(0, end + 1) };
 }
 
-function commitChunk(root, parent, name, data) {
+function commitFiles(root, parent, files) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'skyhop-sync-'));
   const env = { GIT_INDEX_FILE: path.join(tmp, 'index') };
   try {
     if (parent) must(git(root, ['read-tree', parent], { env }), 'read-tree');
-    const blob = must(git(root, ['hash-object', '-w', '--stdin'], { input: data, encoding: 'buffer' }), 'hash-object');
-    must(git(root, ['update-index', '--add', '--cacheinfo', `100644,${blob},${name}`], { env }), 'update-index');
+    for (const [name, data] of files) {
+      const blob = must(git(root, ['hash-object', '-w', '--stdin'], { input: data, encoding: 'buffer' }), 'hash-object');
+      must(git(root, ['update-index', '--add', '--cacheinfo', `100644,${blob},${name}`], { env }), 'update-index');
+    }
     const tree = must(git(root, ['write-tree'], { env }), 'write-tree');
     const parents = parent ? ['-p', parent] : [];
     return must(git(root, ['commit-tree', tree, ...parents, '-m', 'Skyhop encrypted session progress'], { env: AUTHOR }), 'commit-tree');
@@ -214,7 +221,11 @@ export function markBusy(root, open) {
 
 // Returns a warning for the user, or null when everything is saved. The state
 // only moves forward after a successful push, so a failed save retries next time.
-export function saveProgress({ root, transcript, isExcluded = () => false, scan = () => [], timeout = PUSH_TIMEOUT_MS, busy = null }) {
+// The log only goes up with new conversation, because the Mac reads any move of the
+// chat branch as new messages.
+export function saveProgress({
+  root, transcript, isExcluded = () => false, scan = () => [], timeout = PUSH_TIMEOUT_MS, busy = null, log = null,
+}) {
   const skyhop = path.join(root, '.skyhop');
   const config = readJson(path.join(skyhop, 'sync.json'));
   if (!config) return null;
@@ -234,7 +245,9 @@ export function saveProgress({ root, transcript, isExcluded = () => false, scan 
   if (chunk) {
     next.seq = state.seq + 1;
     next.sentBytes = chunk.to;
-    next.chatTip = commitChunk(root, pulse ?? state.chatTip, chunkName(next.seq), sealChunk(chunk, key, next.seq));
+    const files = [[chunkName(next.seq), sealChunk(chunk, key, next.seq)]];
+    if (log) files.push([LOG_NAME, sealChunk({ from: 0, to: 0, bytes: Buffer.from(log) }, key, LOG_SEQ)]);
+    next.chatTip = commitFiles(root, pulse ?? state.chatTip, files);
   } else if (pulse) {
     next.chatTip = pulse;
   }
@@ -268,7 +281,7 @@ export function saveProgress({ root, transcript, isExcluded = () => false, scan 
 
 // Decrypts a saved chat branch in order. Any gap or tampering throws.
 export function readChunks(root, sha, key, expectedFrom) {
-  const names = String(git(root, ['ls-tree', '-r', '--name-only', sha]).stdout).split('\n').filter(Boolean).sort();
+  const names = String(git(root, ['ls-tree', '-r', '--name-only', sha]).stdout).split('\n').filter(name => name.startsWith('chunks/')).sort();
   const parts = [];
   let cursor = expectedFrom;
   names.forEach((name, index) => {
@@ -279,6 +292,17 @@ export function readChunks(root, sha, key, expectedFrom) {
     cursor = chunk.to;
   });
   return { bytes: Buffer.concat(parts), to: cursor, count: names.length };
+}
+
+// The VM's log as of the last save, or null when there is none.
+export function readCloudLog(root, sha, key) {
+  const run = git(root, ['cat-file', 'blob', `${sha}:${LOG_NAME}`], { encoding: 'buffer' });
+  if (run.status !== 0) return null;
+  try {
+    return openChunk(run.stdout, key, LOG_SEQ).bytes.toString('utf8');
+  } catch {
+    return null;
+  }
 }
 
 // A cleared VM starts again from the handoff. This puts back what was already

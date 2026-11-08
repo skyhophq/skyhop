@@ -89,6 +89,13 @@ export function scanDiff(diff) {
   return findings;
 }
 
+// Hides known token formats and hard-coded credentials, for text Skyhop writes to its log.
+export function redactSecrets(text) {
+  let out = text;
+  for (const [rule, pattern] of TOKEN_RULES) out = out.replace(pattern, `[hidden ${rule}]`);
+  return out.replace(ASSIGNMENT_RULE, (match, value) => (PLACEHOLDER.test(value) ? match : match.replace(value, '[hidden]')));
+}
+
 export function formatFinding({ rule, source, line, commit, preview }) {
   const where = [source, line].filter(value => value !== null && value !== undefined).join(':');
   return `${where}${commit ? ` (commit ${commit})` : ''}: ${rule}, ${preview}`;

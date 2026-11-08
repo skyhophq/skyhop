@@ -1,7 +1,7 @@
 {
   "name": "skyhop",
   "displayName": "Skyhop",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Hand off a local terminal session to a Claude Code cloud session, with its code state and conversation, so you can close your laptop and carry on from claude.ai/code.",
   "author": {
     "name": "arya232006"

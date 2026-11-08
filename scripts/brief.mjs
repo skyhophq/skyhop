@@ -1,7 +1,7 @@
 // Turns the brief Claude wrote into the first prompt of the cloud session.
 import fs from 'node:fs';
-import os from 'node:os';
 import { SkyhopError } from './git.mjs';
+import { redactPaths } from './log.mjs';
 
 // Linux limits a single argument to 128 KB.
 export const MAX_PROMPT_BYTES = 100 * 1024;
@@ -13,11 +13,7 @@ const BRIEF_INTRO = 'This session continues work started in a local Claude Code 
 
 const RESUME_MESSAGE = 'Skyhop has moved you to a cloud VM, and this conversation continues from here. The repository is in the current directory and includes the uncommitted local work. Paths from earlier in this conversation may no longer exist, and local services, gitignored files and local MCP servers are not available here. Continue with the remaining work from where we left off. Confirm the plan before large changes.';
 
-export function redactPaths(text, home = os.homedir()) {
-  return text
-    .replaceAll(home, '~')
-    .replace(/(?:\/Users|\/home)\/[^/\s"'`)]+/g, '~');
-}
+export { redactPaths };
 
 export function loadBrief(file) {
   if (!file) throw new SkyhopError('No brief was given.', 'Run this through /skyhop, which writes the brief first.');
@@ -56,10 +52,18 @@ export function resumeMessage(project) {
 export const RECAP_START = '--- Where we left off (a recap for you to read. The session already has its full history) ---';
 export const RECAP_END = '--- End of recap ---';
 
+// The chat can't show the old messages, but a session with Remote Control on keeps
+// them all in its claude.ai entry, so the recap starts with a link to it.
+export function historyNote(entry) {
+  if (!entry) return '';
+  const gap = entry.missing > 0 ? ` Remote Control was off for your last ${entry.missing} messages, so they may be missing there.` : '';
+  return `Your whole conversation from your computer, from the first message, is in this session's Remote Control entry: ${entry.url}${gap}\n\n`;
+}
+
 // The first message of the cloud chat: the instruction for the resumed session,
 // then a recap the user can read, since the chat can't show the old messages.
-export function resumePrompt(project, brief) {
-  return fitPrompt(`${resumeMessage(project)}\n\n${RECAP_START}\n\n${brief}\n\n${RECAP_END}`);
+export function resumePrompt(project, brief, entry = null) {
+  return fitPrompt(`${resumeMessage(project)}\n\n${RECAP_START}\n\n${historyNote(entry)}${brief}\n\n${RECAP_END}`);
 }
 
 // For a chat that already exists, Skyhop's relay takes the message before Claude in
@@ -67,6 +71,6 @@ export function resumePrompt(project, brief) {
 // from starting work on its own. The resumed session never sees the recap.
 export const RECONNECT_NOTE = 'Note for Claude in this chat: this message reconnects the chat to a Skyhop session. If it reaches you with no Skyhop relay reply attached, the reconnection failed. Do not start any work. Reply only that Skyhop could not reconnect this chat, and that running /skyhop --new-chat on the computer starts a new one.';
 
-export function reconnectPrompt(project, brief) {
-  return fitPrompt(`${resumeMessage(project)}\n\n${RECAP_START}\n\n${RECONNECT_NOTE}\n\n${brief}\n\n${RECAP_END}`);
+export function reconnectPrompt(project, brief, entry = null) {
+  return fitPrompt(`${resumeMessage(project)}\n\n${RECAP_START}\n\n${RECONNECT_NOTE}\n\n${historyNote(entry)}${brief}\n\n${RECAP_END}`);
 }

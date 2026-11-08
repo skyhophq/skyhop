@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { localTurnsAfter } from '../scripts/back.mjs';
+import { localTurnsAfter, remoteControlEntry } from '../scripts/back.mjs';
 import { dirty, run, tempDir, write } from './helpers.mjs';
 import { CLOUD, LOCAL, SESSION, setup } from './roundtrip.mjs';
 
@@ -267,3 +267,61 @@ test('an unreadable line counts as local work, which is the safer path', t => {
   fs.writeFileSync(file, 'not json\n');
   assert.equal(localTurnsAfter(file, 0), 1);
 });
+
+test('coming home brings the cloud log, and neither log holds the conversation or the key', t => {
+  const { home, skyhop, handOff, cloudWork, record } = setup(t);
+  cloudWork(handOff());
+  const { key } = record().sync;
+  assert.equal(skyhop(['--back']).status, 0);
+
+  const cloud = fs.readFileSync(path.join(home, `.skyhop/logs/cloud-${SESSION}.log`), 'utf8');
+  assert.match(cloud, / cloud session set up saved-progress=none/);
+  assert.match(cloud, / cloud job end minutes=\S+ outcome=reply/);
+  const local = fs.readFileSync(path.join(home, '.skyhop/logs/skyhop.log'), 'utf8');
+  assert.match(local, / handoff start version=\S+ node=v\d+/);
+  assert.match(local, / handoff plan repo=repo remote=yes sync=on chat="new chat"/);
+  assert.match(local, / handoff launch result=started chat=session_01FakeSessionForTests/);
+  assert.match(local, / back brought home session=11111111 turns=1 conversation="same session" code=apply/);
+  for (const text of [cloud, local]) {
+    assert.doesNotMatch(text, /from my phone|before the handoff|Ship it/);
+    assert.ok(!text.includes(key));
+  }
+});
+
+test('a message that brings the session home is logged with what Skyhop said', t => {
+  const { home, hook, handOff, cloudWork } = setup(t);
+  cloudWork(handOff());
+  hook('start', { source: 'startup', session_id: 'other' });
+  hook('start', { source: 'resume', session_id: SESSION });
+  hook('prompt', { session_id: SESSION });
+  const local = fs.readFileSync(path.join(home, '.skyhop/logs/skyhop.log'), 'utf8');
+  assert.match(local, / home startup session=11111111 said="Skyhop: the session you handed off on .* now has its cloud conversation here/);
+  assert.match(local, / home opened session=11111111 github=reached said="Skyhop: this session was in the cloud/);
+  assert.match(local, / home message session=11111111 outcome="let through" said="Skyhop: this session is back from the cloud/);
+  assert.ok(fs.existsSync(path.join(home, `.skyhop/logs/cloud-${SESSION}.log`)));
+});
+
+const typedLine = text => `${JSON.stringify({ type: 'user', message: { content: text } })}\n`;
+const bridgeLine = id => `${JSON.stringify({ type: 'bridge-session', sessionId: 'x', bridgeSessionId: id, lastSequenceNum: 0 })}\n`;
+
+test('the Remote Control link comes from the newest bridge record', t => {
+  const file = path.join(tempDir(t), 'session.jsonl');
+  fs.writeFileSync(file, typedLine('hi') + bridgeLine('cse_01OlderEntryAbc') + typedLine('more') + bridgeLine('cse_01NewerEntryXyz') + typedLine('last'));
+  assert.deepEqual(remoteControlEntry(file), { url: 'https://claude.ai/code/session_01NewerEntryXyz', missing: 0 });
+});
+
+test('a session that never had Remote Control has no link, and odd records are skipped', t => {
+  const file = path.join(tempDir(t), 'session.jsonl');
+  fs.writeFileSync(file, typedLine('hi'));
+  assert.equal(remoteControlEntry(file), null);
+  assert.equal(remoteControlEntry(path.join(tempDir(t), 'missing.jsonl')), null);
+  fs.writeFileSync(file, bridgeLine('cse_01GoodEntryAbcd') + typedLine('the word "bridge-session" in a message') + bridgeLine('cse_bad/../x') + '{"type":"bridge-session" broken\n');
+  assert.equal(remoteControlEntry(file).url, 'https://claude.ai/code/session_01GoodEntryAbcd');
+});
+
+test('messages typed long after the last bridge record are counted as possibly missing', t => {
+  const file = path.join(tempDir(t), 'session.jsonl');
+  fs.writeFileSync(file, bridgeLine('cse_01SomeEntryAbcd') + Array.from({ length: 12 }, (_, i) => typedLine(`m${i}`)).join(''));
+  assert.deepEqual(remoteControlEntry(file), { url: 'https://claude.ai/code/session_01SomeEntryAbcd', missing: 12 });
+});
+

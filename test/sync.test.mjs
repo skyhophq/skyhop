@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { isSensitivePath, scanDiff } from '../scripts/secrets.mjs';
-import { newKey, openChunk, openTranscript, readChunks, restoreProgress, saveProgress, sealChunk, sealTranscript } from '../scripts/sync.mjs';
+import {
+  newKey, openChunk, openTranscript, readChunks, readCloudLog, restoreProgress, saveProgress, sealChunk, sealTranscript,
+} from '../scripts/sync.mjs';
 import { makeRepo, run, write } from './helpers.mjs';
 
 const FAKE_TOKEN = `gh${'p'}_${'a'.repeat(36)}`;
@@ -229,3 +231,31 @@ test('a gap in the saved chunks is refused', t => {
   run(root, 'fetch', '-q', 'origin', config.chatRef);
   assert.throws(() => readChunks(root, run(root, 'rev-parse', 'FETCH_HEAD'), key, BASE.length + 1), /gap/);
 });
+
+test('the VM log goes up encrypted with new conversation, and chunk reading skips it', t => {
+  const { root, bare, key, transcript, config, save, remoteRef } = vm(t);
+  fs.appendFileSync(transcript, '{"line":"from the cloud"}\n');
+  assert.equal(save({ log: 'cloud job end outcome=reply\n' }), null);
+  const tip = remoteRef(config.chatRef);
+  assert.ok(!run(bare, 'cat-file', '-p', `${tip}:log.enc`).includes('outcome'));
+  run(root, 'fetch', '-q', 'origin', config.chatRef);
+  const fetched = run(root, 'rev-parse', 'FETCH_HEAD');
+  assert.equal(readCloudLog(root, fetched, key), 'cloud job end outcome=reply\n');
+  assert.equal(readCloudLog(root, fetched, newKey()), null);
+  assert.equal(readChunks(root, fetched, key, BASE.length).bytes.toString(), '{"line":"from the cloud"}\n');
+});
+
+test('the log alone never moves the chat branch, which the Mac reads as new messages', t => {
+  const { save, config, remoteRef } = vm(t);
+  assert.equal(save({ log: 'cloud stop\n' }), null);
+  assert.equal(remoteRef(config.chatRef), null);
+});
+
+test('a save from before logs existed reads as having no log', t => {
+  const { root, key, transcript, config, save } = vm(t);
+  fs.appendFileSync(transcript, '{"line":"x"}\n');
+  save();
+  run(root, 'fetch', '-q', 'origin', config.chatRef);
+  assert.equal(readCloudLog(root, run(root, 'rev-parse', 'FETCH_HEAD'), key), null);
+});
+

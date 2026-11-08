@@ -49,5 +49,11 @@ async function main() {
 try {
   await main();
 } catch (error) {
+  try {
+    const { log } = await import('./log.mjs');
+    log('hook', 'error', { event, error: error.message });
+  } catch {
+    // the message below still reaches the user
+  }
   print({ systemMessage: `Skyhop hook error: ${error.message}` });
 }

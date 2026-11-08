@@ -19,8 +19,9 @@ import { redactPaths } from './brief.mjs';
 import { readHistory } from './cloud.mjs';
 import { findTranscript } from './fullresume.mjs';
 import { createSnapshot, git, repoInfo, skyhopBranch, SkyhopError, tryGit } from './git.mjs';
+import { log, logDir, shortId } from './log.mjs';
 import { isSensitivePath } from './secrets.mjs';
-import { pulseRef, readChunks } from './sync.mjs';
+import { pulseRef, readChunks, readCloudLog } from './sync.mjs';
 
 const CHAT_REF = 'refs/skyhop/back-chat';
 const CODE_REF = 'refs/skyhop/back-code';
@@ -158,6 +159,41 @@ export function localTurnsAfter(file, from) {
   return typedTurns(fs.readFileSync(file).subarray(from));
 }
 
+// The claude.ai entry for the session's Remote Control, which keeps the whole
+// conversation readable on the phone, even once it's archived. While Remote Control
+// is on, Claude Code rewrites a bridge-session record every few messages, and the
+// newest one names the current entry. Its ID matches the entry's link apart from the
+// prefix: cse_ in the file, session_ in the link. The format is internal, so anything
+// unexpected means no link. `missing` counts messages typed after the newest record,
+// once there are more than a few records' worth, which means Remote Control was off.
+const BRIDGE_MARK = Buffer.from('"bridge-session"');
+const STALE_TURNS = 10;
+
+export function remoteControlEntry(file) {
+  let bytes;
+  try {
+    bytes = fs.readFileSync(file);
+  } catch {
+    return null;
+  }
+  for (let at = bytes.lastIndexOf(BRIDGE_MARK); at >= 0; at = at > 0 ? bytes.lastIndexOf(BRIDGE_MARK, at - 1) : -1) {
+    const start = bytes.lastIndexOf(10, at) + 1;
+    const newline = bytes.indexOf(10, at);
+    const end = newline < 0 ? bytes.length : newline + 1;
+    let record;
+    try {
+      record = JSON.parse(bytes.subarray(start, end).toString('utf8'));
+    } catch {
+      continue;
+    }
+    const id = record?.type === 'bridge-session' ? String(record.bridgeSessionId ?? '').match(/^(?:cse|session)_([A-Za-z0-9]{10,})$/) : null;
+    if (!id) continue;
+    const later = typedTurns(bytes.subarray(end));
+    return { url: `https://claude.ai/code/session_${id[1]}`, missing: later > STALE_TURNS ? later : 0 };
+  }
+  return null;
+}
+
 // Where this Mac's copy of the session stops: the handoff point, or the end of
 // the cloud conversation that was last added to it.
 function localEnd(record) {
@@ -184,9 +220,22 @@ function readSaved(info, sha, record) {
   }
 }
 
+// The cloud's own log comes down with the conversation, for bug reports. It is a
+// copy, replaced by the newer one each time.
+function saveCloudLog(info, sha, record, home) {
+  const text = readCloudLog(info.root, sha, record.sync.key);
+  if (!text) return;
+  try {
+    fs.mkdirSync(logDir(home), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(logDir(home), `cloud-${record.sessionId}.log`), text, { mode: 0o600 });
+  } catch {
+    // only for bug reports
+  }
+}
+
 // Downloads the saved conversation and code. `all` is everything since the
 // handoff, and `fresh` is the part this Mac doesn't have yet.
-function download(info, record, branches) {
+function download(info, record, branches, home) {
   const wanted = [[record.sync.chatRef, CHAT_REF, branches.chat], [record.sync.codeRef, CODE_REF, branches.code]]
     .filter(([, , sha]) => sha);
   if (wanted.length > 0) {
@@ -197,6 +246,7 @@ function download(info, record, branches) {
   }
   const chatSha = branches.chat ? git(info.root, ['rev-parse', CHAT_REF]) : null;
   const codeSha = branches.code ? git(info.root, ['rev-parse', CODE_REF]) : null;
+  if (chatSha) saveCloudLog(info, chatSha, record, home);
   const saved = chatSha ? readSaved(info, chatSha, record) : { bytes: Buffer.alloc(0), to: record.baseBytes, count: 0 };
   const lines = assertValidLines(saved.bytes);
   const known = (record.pulledTo ?? record.baseBytes) - record.baseBytes;
@@ -310,13 +360,16 @@ export function pullAll({ cwd, home = os.homedir() }) {
     return [];
   }
   return waitingRecords(info.root, home).filter(record => record.sync).map(record => {
+    let line;
     try {
-      return pullOne(info, record, home);
+      line = pullOne(info, record, home);
     } catch (error) {
-      return `Skyhop could not update ${label(record)} from the cloud: ${error.message}`;
+      line = `Skyhop could not update ${label(record)} from the cloud: ${error.message}`;
     } finally {
       dropDownloads(info);
     }
+    log('home', 'startup', { session: shortId(record.sessionId), said: line }, home);
+    return line;
   });
 }
 
@@ -335,7 +388,7 @@ function pullOne(info, record, home) {
   if (localTurnsAfter(file, localEnd(record)) > 0) {
     return `Skyhop: ${name} has new messages in the cloud, and you also typed in it here after the handoff. Run /skyhop-back to get the cloud part as a separate session.`;
   }
-  const got = download(info, record, branches);
+  const got = download(info, record, branches, home);
   if (got.fresh.length === 0) return waiting;
 
   const backup = record.backup ?? backupSession(file, record.sessionId, home);
@@ -358,10 +411,11 @@ export function onResume({ sessionId, pid, home = os.homedir() }) {
     return null;
   }
   const branches = cloudBranches(info, record);
-  if (branches?.chat && branches.chat !== record.pulledChat) {
-    return 'Skyhop: this session has new messages in the cloud that are not shown here. Quit (type /exit), open claude in this folder, and pick it in /resume.';
-  }
-  return 'Skyhop: this session was in the cloud. It comes home when you send a message, and the cloud chat closes then.';
+  const line = branches?.chat && branches.chat !== record.pulledChat
+    ? 'Skyhop: this session has new messages in the cloud that are not shown here. Quit (type /exit), open claude in this folder, and pick it in /resume.'
+    : 'Skyhop: this session was in the cloud. It comes home when you send a message, and the cloud chat closes then.';
+  log('home', 'opened', { session: shortId(sessionId), github: branches ? 'reached' : 'unreachable', said: line }, home);
+  return line;
 }
 
 function allow(message, context) {
@@ -386,13 +440,18 @@ export function claim({ sessionId, pid, home = os.homedir() }) {
   } catch {
     return null;
   }
+  let output;
   try {
-    return claimHere(info, record, pid, home);
+    output = claimHere(info, record, pid, home);
   } catch (error) {
-    return allow(`Skyhop could not finish bringing this session home: ${error.message}`);
+    output = allow(`Skyhop could not finish bringing this session home: ${error.message}`);
   } finally {
     dropDownloads(info);
   }
+  log('home', 'message', {
+    session: shortId(sessionId), outcome: output.decision === 'block' ? 'stopped' : 'let through', said: output.reason ?? output.systemMessage,
+  }, home);
+  return output;
 }
 
 function claimHere(info, record, pid, home) {
@@ -416,7 +475,7 @@ function claimHere(info, record, pid, home) {
     return block('This window opened the session before its cloud conversation arrived, so that part is not shown here. Quit (type /exit) and pick it in /resume again.');
   }
 
-  const got = download(info, record, branches);
+  const got = download(info, record, branches, home);
   if (!closeCloud(info, record, branches)) {
     return allow(`Skyhop couldn't close this session's cloud chat on ${info.remote}. Avoid using it: Skyhop tries again on your next message here.`);
   }
@@ -480,11 +539,13 @@ function bringBackRecord(info, record, dryRun, home) {
   const branches = cloudBranches(info, record);
   if (!branches) throw new SkyhopError(`Could not reach ${info.remote}, so nothing was changed.`, 'Check your connection, then run /skyhop-back again.');
   if (!dryRun && stillBusy(branches, record)) {
+    log('back', 'still working in the cloud', { session: shortId(record.sessionId) }, home);
     saveHandoffRecord({ ...record, busyWarned: branches.pulse }, home);
     console.log('The cloud session is still working on a reply. Run /skyhop-back again once it has finished. If it never finishes, running it again brings home everything saved before that reply.');
     return 1;
   }
   if (!branches.chat && !branches.code && !record.pulledChat) {
+    log('back', 'nothing saved yet', { session: shortId(record.sessionId) }, home);
     console.log('Nothing has been saved yet. Send the cloud session a message, wait for its reply, then try again.');
     return 0;
   }
@@ -496,7 +557,7 @@ function bringBackRecord(info, record, dryRun, home) {
   }
 
   const file = findTranscript(record.sessionId).path;
-  const got = download(info, record, branches);
+  const got = download(info, record, branches, home);
   const typed = localTurnsAfter(file, localEnd(record));
   const fork = got.fresh.length > 0 && typed > 0;
   console.log(`Saved in the cloud: ${got.count} message turn(s), ${got.lines} transcript record(s).`);
@@ -519,6 +580,7 @@ function bringBackRecord(info, record, dryRun, home) {
   markHome(record, home, { resumeId, backup });
   const code = bringCode(info, record, got.codeSha, false);
   tidyRemote(info, record, got);
+  log('back', 'brought home', { session: shortId(record.sessionId), turns: got.count, conversation: fork ? 'new session' : 'same session', code: code.kind }, home);
 
   console.log(fork
     ? `\nThe cloud conversation is in a new session, because you typed ${typed} message(s) in it after the handoff. Your original session wasn't changed.`

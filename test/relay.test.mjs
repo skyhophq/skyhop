@@ -8,6 +8,9 @@ import {
   deniedNote, formatReply, handlePrompt, innerArgs, jobStatus, modeRequest, parseRun, permissionArgs, readEvents, relayOutput,
   replyNow, resolveMode, runJob, stepsNote, stripRecap, trimPartialLine, waitForReply, WAIT_COMMAND,
 } from '../scripts/relay.mjs';
+import { resumePrompt } from '../scripts/brief.mjs';
+import { VM_SCRIPTS } from '../scripts/fullresume.mjs';
+import { cloudLogFile } from '../scripts/log.mjs';
 import { newKey, sealTranscript } from '../scripts/sync.mjs';
 import { alive, makeRepo, sleeper, write } from './helpers.mjs';
 
@@ -256,7 +259,7 @@ test('reads events in chunks, including lines longer than a chunk', t => {
 
 test('the real background runner works end to end, and the hook returns at once', async t => {
   const { root, base } = vm(t);
-  for (const script of ['relay.mjs', 'sync.mjs', 'secrets.mjs']) fs.copyFileSync(path.join(SCRIPTS, script), path.join(root, '.skyhop', script));
+  for (const script of VM_SCRIPTS) fs.copyFileSync(path.join(SCRIPTS, script), path.join(root, '.skyhop', script));
   const env = {
     ...process.env, HOME: base, PATH: `${FIXTURES}:${process.env.PATH}`, FAKE_CLAUDE_DIR: base, FAKE_INNER_SECONDS: '2',
     SKYHOP_FORCE: '1', SKYHOP_INNER: '', CLAUDE_PROJECT_DIR: root, SKYHOP_WAIT_MS: '300',
@@ -279,7 +282,7 @@ test('the real background runner works end to end, and the hook returns at once'
 
 test('skyhop stop on the real runner also stops the session under it', async t => {
   const { root, base, job } = vm(t);
-  for (const script of ['relay.mjs', 'sync.mjs', 'secrets.mjs']) fs.copyFileSync(path.join(SCRIPTS, script), path.join(root, '.skyhop', script));
+  for (const script of VM_SCRIPTS) fs.copyFileSync(path.join(SCRIPTS, script), path.join(root, '.skyhop', script));
   const env = {
     ...process.env, HOME: base, PATH: `${FIXTURES}:${process.env.PATH}`, FAKE_CLAUDE_DIR: base, FAKE_INNER_SECONDS: '3',
     SKYHOP_FORCE: '1', SKYHOP_INNER: '', CLAUDE_PROJECT_DIR: root,
@@ -550,3 +553,51 @@ test('joins the reply and the refusal note', () => {
   const reply = formatReply({ result: 'Done.', permission_denials: [{ tool_name: 'Bash' }] }, 'default');
   assert.match(reply, /^Done\.\n\nBlocked in default mode: Bash\./);
 });
+
+test('the cloud log records each message and how it ended, never its words', t => {
+  const { root, send } = vm(t);
+  send({ prompt: 'please fix the zebra-unicorn bug', result: ok('the zebra-unicorn bug is fixed') });
+  const text = fs.readFileSync(cloudLogFile(root), 'utf8');
+  assert.match(text, / cloud job start first=yes version=\S+ node=v\d+/);
+  assert.match(text, / cloud job end minutes=\d+\.\d outcome=reply steps=0 chars=\d+/);
+  assert.match(text, / cloud reply shown kind=reply/);
+  assert.doesNotMatch(text, /zebra/);
+});
+
+test('a lost job and a message sent while busy are logged', t => {
+  const { root, send, running } = vm(t);
+  running('first');
+  send({ prompt: 'second', collect: false });
+  write(root, '.skyhop/job/job.json', JSON.stringify({ ...JSON.parse(fs.readFileSync(path.join(root, '.skyhop/job/job.json'), 'utf8')), pid: Number(deadPid()) }));
+  replyNow(root);
+  const text = fs.readFileSync(cloudLogFile(root), 'utf8');
+  assert.match(text, / cloud message while the last one was unfinished, not passed on job=running/);
+  assert.match(text, / cloud job lost reason="the process is gone"/);
+});
+
+test('skyhop log shows the cloud log in the chat, without reaching the session', t => {
+  const { root, send } = vm(t);
+  assert.match(send({ prompt: 'skyhop log', resume: () => assert.fail('the session was started') }).reply, /has not logged anything/);
+  send({ prompt: 'first' });
+  const { reply } = send({ prompt: 'skyhop log', resume: () => assert.fail('the session was started') });
+  assert.match(reply, /Skyhop's log on this cloud machine, last \d+ line\(s\)/);
+  assert.match(reply, / cloud job end /);
+  assert.ok(fs.existsSync(cloudLogFile(root)));
+});
+
+test('the relay ships every module it needs to the VM', () => {
+  const imports = file => [...fs.readFileSync(path.join(SCRIPTS, file), 'utf8').matchAll(/from '\.\/([\w-]+\.mjs)'/g)].map(match => match[1]);
+  const needed = new Set(['relay.mjs']);
+  for (const file of needed) for (const dependency of imports(file)) needed.add(dependency);
+  assert.deepEqual([...needed].sort(), [...VM_SCRIPTS].sort());
+});
+
+test('the history link is for the user and never reaches the resumed session', () => {
+  const first = resumePrompt('app', '## Goal\nShip it.', { url: 'https://claude.ai/code/session_01AbcdefghijKL', missing: 0 });
+  assert.match(first, /--- Where we left off[^\n]*\n\nYour whole conversation from your computer, from the first message, is in this session's Remote Control entry: https:\/\/claude\.ai\/code\/session_01AbcdefghijKL\n\n## Goal/);
+  assert.doesNotMatch(stripRecap(first), /claude\.ai|Remote Control/);
+  const gap = resumePrompt('app', 'brief', { url: 'https://claude.ai/code/session_01AbcdefghijKL', missing: 14 });
+  assert.match(gap, /Remote Control was off for your last 14 messages, so they may be missing there\./);
+  assert.doesNotMatch(resumePrompt('app', 'brief'), /Remote Control/);
+});
+

@@ -72,7 +72,9 @@ Skyhop snapshots your work to a new branch and starts a cloud session on it. The
 
 Skyhop pushes your code and the session's transcript to a `skyhop-run/...` branch, with the transcript encrypted. The key goes only in the first message of the cloud session, never through GitHub. A hook in the VM decrypts the transcript and starts a second Claude Code process with `--resume`, which loads the real conversation. That process does the work in the background. Meanwhile the chat Claude waits by running a short Skyhop command about every 100 seconds, then repeats the reply.
 
-**Your session continues in the cloud, from a copy of its transcript.** The cloud chat you type into is a new chat that passes your messages to it, because Anthropic's cloud can't adopt a local session. That chat can't show your old messages, so its first message is a recap of where you left off. The session itself has the full history, and it comes back to your machine as the same session. The limits are:
+**Your session continues in the cloud, from a copy of its transcript.** The cloud chat you type into is a new chat that passes your messages to it, because Anthropic's cloud can't adopt a local session. That chat can't show your old messages, so its first message is a recap of where you left off. The session itself has the full history, and it comes back to your machine as the same session.
+
+**To read the whole earlier conversation on your phone, turn on Remote Control before you hand off.** Run `/remote-control` in the session, or set **Enable Remote Control for all sessions** in `/config` once. Remote Control keeps every message of the session in its own entry on claude.ai, and the entry stays readable after you quit, under **Archived** in the Claude app. Skyhop finds that entry in the session file and puts its link at the top of the cloud chat's recap, so the full conversation is one tap away. The plan shows the link, or says how to get one. If Remote Control was off for your last messages, the recap says the entry may be missing them. The limits are:
 
 - **Progress instead of live tool activity.** While a message runs, the chat shows a `node .skyhop/relay.mjs wait` command about every 100 seconds, each with how long it has run and its latest steps. The reply then appears with a **Steps taken** list of what it did.
 - **Replies are generated twice**, once by the resumed session and once by the chat Claude repeating them. The chat Claude runs on Haiku to keep this cheap, and it could change the wording slightly. Each wait is also a small Haiku call, so a long message uses a little more.
@@ -81,6 +83,7 @@ Skyhop pushes your code and the session's transcript to a `skyhop-run/...` branc
 - **One message can run for up to six hours.** A single 36-minute message has been tested through Skyhop. Before version 0.6.0, a message stopped at about 25 minutes, because the cloud stops a machine whose reply shows no activity for that long. The wait commands are that activity.
 - **Send one message at a time.** A message sent while a reply is running isn't passed on, and the reply tells you to send it again.
 - **To stop a long reply,** press stop in the chat, then send `skyhop stop`. The session's work so far is kept and saved.
+- **To see what Skyhop did in the cloud,** send `skyhop log`. The chat shows the last 40 lines of the cloud machine's Skyhop log, without passing anything to the session.
 - **If the chat stops waiting before the reply,** the session keeps going until the cloud shuts the idle machine down, a few minutes later. The machine keeps its files but not the running work. Your next message then shows the reply if it finished in time, or says the message stopped before it finished.
 - **It depends on an internal file format.** The transcript format can change on any Claude Code release. If the VM can't load it, the session falls back to the brief and says so.
 - **Long sessions use more of your plan on every message.**
@@ -146,7 +149,16 @@ In either mode, the cloud VM won't have:
 - **Skyhop never answers the trust prompt or changes your trust settings.** It relies on the trust a worktree shares with its repository.
 - **A failed handoff tells you how to retry.** The brief is kept in `~/.skyhop/briefs/`.
 
-Skyhop keeps its files in `~/.skyhop/`: briefs, a history of handoffs, the keys for handoffs in progress, session backups, and a temporary launch worktree. The worktree and its local branch are removed after the launch. If a handoff is waiting on you, they stay until your next handoff from that repository.
+Skyhop keeps its files in `~/.skyhop/`: briefs, a history of handoffs, the keys for handoffs in progress, session backups, logs, and a temporary launch worktree. The worktree and its local branch are removed after the launch. If a handoff is waiting on you, they stay until your next handoff from that repository.
+
+## Reporting a problem
+
+Skyhop logs what it does to `~/.skyhop/logs/`, so a bug report can show where something went wrong:
+
+- **`skyhop.log`** covers this machine: each handoff step, the secret scan's result, the launch, and every message that brought a session home.
+- **`cloud-<session>.log`** is the cloud machine's log for that session, as of its last save. It travels home encrypted with the conversation. In the cloud chat, `skyhop log` shows the same log live.
+
+The logs hold steps, outcomes, errors and Skyhop's own messages, never your conversation, prompts, replies or keys. Home folders, credentials in URLs and known token formats are hidden too. Each log starts over past 512 KB and keeps one older file. Attach the `logs` folder to a bug report, along with what you did and the output of `claude --version`.
 
 ## Known limitations
 

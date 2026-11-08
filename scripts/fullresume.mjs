@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 import { git, SkyhopError, tryGit } from './git.mjs';
+import { skyhopVersion } from './log.mjs';
 import { RELAY_COMMIT_MARKER, WAIT_COMMAND } from './relay.mjs';
 import { sealTranscript } from './sync.mjs';
 
@@ -26,7 +27,7 @@ const RELAY_COMMAND = 'node "$CLAUDE_PROJECT_DIR/.skyhop/relay.mjs"';
 const WAIT_RULE = `Bash(${WAIT_COMMAND})`;
 const SCRIPTS = path.dirname(fileURLToPath(import.meta.url));
 // Everything the relay needs in the VM, where the plugin isn't installed.
-const VM_SCRIPTS = ['relay.mjs', 'secrets.mjs', 'sync.mjs'];
+export const VM_SCRIPTS = ['log.mjs', 'relay.mjs', 'secrets.mjs', 'sync.mjs'];
 
 function projectsDir() {
   return path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'projects');
@@ -99,6 +100,7 @@ export function addRelayCommit(dir, { transcript, sessionId, mode, brief, sync, 
   }
   for (const script of VM_SCRIPTS) fs.copyFileSync(path.join(SCRIPTS, script), path.join(skyhop, script));
   fs.writeFileSync(path.join(skyhop, 'session-id'), `${sessionId}\n`);
+  fs.writeFileSync(path.join(skyhop, 'version'), `${skyhopVersion()}\n`);
   fs.writeFileSync(path.join(skyhop, 'mode'), `${mode}\n`);
   fs.writeFileSync(path.join(skyhop, 'brief.md'), `${brief}\n`);
   if (sync) fs.writeFileSync(path.join(skyhop, 'sync.json'), JSON.stringify({ ...sync, baseBytes: bytes.length }));

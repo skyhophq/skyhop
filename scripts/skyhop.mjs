@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 // Main entry point for /skyhop and /skyhop-status.
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
-import { bringBack, readRecord, saveHandoffRecord, waitingRecords } from './back.mjs';
+import {
+  bringBack, readRecord, remoteControlEntry, saveHandoffRecord, waitingRecords,
+} from './back.mjs';
 import { briefPrompt, loadBrief, reconnectPrompt, redactPaths, resumePrompt } from './brief.mjs';
 import {
   launchSession, launchTimes, pasteCommand, readHistory, recordHandoff, reopenWaitMs, requireSignIn, sendToChat, waitForBranch,
@@ -16,6 +19,7 @@ import {
   pushBranch, removeLaunchFolder, repoBytes, repoInfo, skyhopBranch, SkyhopError, snapshotStat, tryGit,
 } from './git.mjs';
 import { findLeftovers, formatLeftovers, removeLeftovers } from './leftovers.mjs';
+import { log, logDir, skyhopVersion } from './log.mjs';
 import { formatFinding, isSensitivePath, scanDiff, scanText } from './secrets.mjs';
 import { newKey, pulseRef } from './sync.mjs';
 
@@ -61,7 +65,7 @@ function syncEnabled(info, options) {
   return Boolean(info.remoteUrl) && !options['no-sync'];
 }
 
-function printPlan({ info, branch, snapshot, pending, options, transcript, reuse }) {
+function printPlan({ info, branch, snapshot, pending, options, transcript, reuse, remote }) {
   const fullResume = options['full-resume'];
   const lines = [
     'Skyhop plan',
@@ -88,6 +92,10 @@ function printPlan({ info, branch, snapshot, pending, options, transcript, reuse
           '  Sync:       off, so /skyhop-back will have nothing to bring home',
         ]),
     );
+    lines.push(remote
+      ? `  History:    the cloud chat links to your whole conversation, in this session's Remote Control entry: ${remote.url}`
+      : '  History:    the cloud chat starts with a recap. For a link to your whole conversation there, turn on Remote Control first: /remote-control, or "Enable Remote Control for all sessions" in /config');
+    if (remote?.missing) lines.push(`              Remote Control was off for your last ${remote.missing} messages, so that entry may not show them.`);
     if (transcript.bytes >= LARGE_TRANSCRIPT_BYTES) lines.push('  Warning:    long sessions use more of your plan on every message.');
   } else {
     lines.push(
@@ -145,6 +153,7 @@ function savePrompt(briefFile, prompt) {
 const COMING_HOME = 'Quit this window now (type /exit). When you are back, open claude in this folder and pick this session in /resume: it will have the cloud conversation, and it comes home for good when you send a message.';
 
 function reportLaunch({ outcome, command, record, synced }) {
+  log('handoff', 'launch', { result: outcome.status, reason: outcome.reason, chat: outcome.sessionId });
   if (outcome.status === 'started') {
     recordHandoff({ ...record, status: 'started', sessionId: outcome.sessionId, url: outcome.url });
     console.log(`\nCloud session started on ${record.branch}.\nSession ID: ${outcome.sessionId}\nLink: ${outcome.url}`);
@@ -177,6 +186,7 @@ function clearOldStart(info, name) {
 // chat picked up the handoff.
 async function reportReconnect({ info, reuse, record, ackBranch }) {
   const picked = await waitForBranch(info, ackBranch, reopenWaitMs());
+  log('handoff', picked ? 'the earlier chat picked it up' : 'the earlier chat has not answered yet');
   recordHandoff({ ...record, status: picked ? 'reconnected' : 'sent to earlier chat', sessionId: reuse.sessionId, url: reuse.url });
   console.log(picked
     ? `\nBack in this session's earlier cloud chat: ${reuse.url}\nIt picked up the handoff and is replying there now.`
@@ -185,8 +195,23 @@ async function reportReconnect({ info, reuse, record, ackBranch }) {
   return 0;
 }
 
+function claudeVersion() {
+  const run = spawnSync('claude', ['--version'], { encoding: 'utf8', timeout: 5000 });
+  return String(run.stdout ?? '').trim().split(' ')[0] || null;
+}
+
+const LOGGED_FLAGS = ['dry-run', 'yes', 'no-sync', 'new-chat', 'allow-secrets'];
+
 async function handoff(options) {
   const fullResume = options['full-resume'];
+  log('handoff', 'start', {
+    version: skyhopVersion(),
+    claude: claudeVersion(),
+    node: process.version,
+    os: `${process.platform} ${os.release()}`,
+    mode: fullResume ? `full resume, ${options.mode}` : 'summary',
+    flags: LOGGED_FLAGS.filter(flag => options[flag]).join(','),
+  });
   const info = repoInfo(process.cwd());
   const brief = loadBrief(options.brief);
   requireSignIn();
@@ -207,7 +232,8 @@ async function handoff(options) {
   // A session that came home goes back to the chat it used last time, if that
   // chat's relay can switch to a new handoff.
   const reuse = !options['new-chat'] && earlier?.cloud?.reopen ? earlier.cloud : null;
-  const prompt = fullResume ? resumePrompt(project, brief) : briefPrompt(brief, project);
+  const remote = fullResume ? remoteControlEntry(transcript.path) : null;
+  const prompt = fullResume ? resumePrompt(project, brief, remote) : briefPrompt(brief, project);
   const branch = chooseBranch(options, info);
   const snapshot = createSnapshot(info, {
     isExcluded: isSensitivePath,
@@ -217,9 +243,25 @@ async function handoff(options) {
   const repoSize = fullResume && !useSync ? repoBytes(info.root, snapshot.sha) : 0;
   if (fullResume && !useSync) transcript.compressed = measureUpload(transcript, repoSize);
 
-  printPlan({ info, branch, snapshot, pending, options, transcript, reuse });
+  printPlan({ info, branch, snapshot, pending, options, transcript, reuse, remote });
+  log('handoff', 'plan', {
+    repo: project,
+    remote: info.remote ? 'yes' : 'none',
+    sync: fullResume ? (useSync ? 'on' : 'off') : null,
+    chat: fullResume ? (reuse ? 'earlier chat' : 'new chat') : null,
+    changed: snapshot.files.length,
+    unpushed: pending,
+    'left-out': snapshot.excluded.length || null,
+    transcript: transcript ? `${(transcript.bytes / 1e6).toFixed(1)}MB` : null,
+    history: fullResume ? (remote ? 'remote control link' : 'recap only') : null,
+  });
 
   const findings = findSecrets({ info, snapshot, prompt, transcript });
+  log('handoff', 'secret scan', {
+    found: findings.length,
+    rules: [...new Set(findings.map(finding => finding.rule))].join(','),
+    continued: findings.length > 0 && options['allow-secrets'] ? 'allow-secrets' : null,
+  });
   if (findings.length > 0) {
     console.log(`\nLikely secrets found:\n${findings.map(finding => `  ${formatFinding(finding)}`).join('\n')}`);
     if (!options['allow-secrets']) {
@@ -231,21 +273,27 @@ async function handoff(options) {
   }
 
   if (options['dry-run']) {
-    console.log(`\nDry run: nothing was pushed or started.\n\n--- First prompt ---\n${reuse ? reconnectPrompt(project, brief) : prompt}`);
+    log('handoff', 'dry run, nothing sent');
+    console.log(`\nDry run: nothing was pushed or started.\n\n--- First prompt ---\n${reuse ? reconnectPrompt(project, brief, remote) : prompt}`);
     return 0;
   }
   if (!options.yes) {
     if (!process.stdin.isTTY) {
+      log('handoff', 'waiting for confirmation');
       console.log('\nConfirmation needed. Run again with --yes once the user has agreed.');
       return EXIT_NEEDS_CONFIRMATION;
     }
     if (!await confirm()) {
+      log('handoff', 'cancelled');
       console.log('Stopped. Nothing was pushed or started.');
       return 0;
     }
   }
 
-  if (!fullResume) pushBranch(info, snapshot.sha, branch);
+  if (!fullResume) {
+    pushBranch(info, snapshot.sha, branch);
+    log('handoff', 'pushed', { branch });
+  }
   const tail = branch.slice('skyhop/'.length);
   // A reused chat keeps its start branch and key, so a cloud machine that has to
   // start again finds the new handoff where it found the first one.
@@ -270,7 +318,10 @@ async function handoff(options) {
       head: info.head, snapshotTree: snapshot.tree, sync: sync && { ...sync, key },
     };
     saveHandoffRecord(handoffRecord);
-    if (useSync) pushBranch(info, git(dir, ['rev-parse', 'HEAD']), startBranch);
+    if (useSync) {
+      pushBranch(info, git(dir, ['rev-parse', 'HEAD']), startBranch);
+      log('handoff', 'pushed', { branch: startBranch });
+    }
   }
 
   const command = pasteCommand(dir, promptFile, env);
@@ -282,8 +333,9 @@ async function handoff(options) {
     pushed: !fullResume || useSync,
   };
   if (reuse) {
-    const reconnect = `${reconnectPrompt(project, brief)}\n\n[skyhop-key:${key}]\n[skyhop-reopen:${startBranch}]`;
+    const reconnect = `${reconnectPrompt(project, brief, remote)}\n\n[skyhop-key:${key}]\n[skyhop-reopen:${startBranch}]`;
     const sent = sendToChat(reuse.sessionId, reconnect);
+    log('handoff', sent.ok ? 'sent to the earlier chat' : 'the earlier chat refused it', { chat: reuse.sessionId, error: sent.error });
     if (sent.ok) {
       removeLaunchFolder(info);
       saveHandoffRecord({ ...handoffRecord, cloud: reuse });
@@ -326,6 +378,7 @@ function showStatus({ clean }) {
       return 0;
     }
     const { removed, failed } = removeLeftovers(info, leftovers);
+    log('status', 'clean', { removed: removed.length, failed: failed.length || null });
     if (removed.length > 0) console.log(`Removed:\n${removed.map(name => `  ${name}`).join('\n')}`);
     if (failed.length > 0) console.log(`Could not remove:\n${failed.map(name => `  ${name}`).join('\n')}`);
     return failed.length > 0 ? 1 : 0;
@@ -347,6 +400,7 @@ function showStatus({ clean }) {
     }
   }
   if (info?.remote) console.log(formatLeftovers(info, findLeftovers(info, os.homedir())));
+  if (fs.existsSync(logDir())) console.log(`\nIf something went wrong, Skyhop's logs are in ~/.skyhop/logs/. They hold steps and errors, not your conversation, so you can attach them to a bug report.`);
   return 0;
 }
 
@@ -356,10 +410,16 @@ async function main() {
   return options.status || options.clean ? showStatus(options) : handoff(options);
 }
 
+const COMMAND = ['--back', '--clean', '--status'].find(flag => process.argv.includes(flag))?.slice(2) ?? 'handoff';
+
 try {
   process.exitCode = await main();
 } catch (error) {
-  if (!(error instanceof SkyhopError)) throw error;
+  if (!(error instanceof SkyhopError)) {
+    log(COMMAND, 'crash', { error: String(error.stack ?? error).split('\n').slice(0, 4).join(' | ') });
+    throw error;
+  }
+  log(COMMAND, 'stopped', { error: error.message });
   console.error(`\nSkyhop: ${error.message}${error.hint ? `\n${error.hint}` : ''}`);
   process.exitCode = 1;
 }
