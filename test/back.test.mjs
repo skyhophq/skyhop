@@ -319,6 +319,19 @@ test('a message that brings the session home is logged with what Skyhop said', t
   assert.ok(fs.existsSync(path.join(home, `.skyhop/logs/cloud-${SESSION}.log`)));
 });
 
+test('opening a session that shows its cloud part leaves the note for the plane home, and coming home removes it', t => {
+  const { home, hook, handOff, cloudWork } = setup(t);
+  const note = path.join(home, `.skyhop/animate/${SESSION}.json`);
+  cloudWork(handOff());
+  hook('start', { source: 'startup', session_id: 'other' });
+  assert.ok(!fs.existsSync(note));
+  hook('start', { source: 'resume', session_id: SESSION });
+  assert.equal(typeof JSON.parse(fs.readFileSync(note, 'utf8')).at, 'number');
+  assert.equal(fs.statSync(note).mode & 0o777, 0o600);
+  hook('prompt', { session_id: SESSION });
+  assert.ok(!fs.existsSync(note));
+});
+
 const typedLine = text => `${JSON.stringify({ type: 'user', message: { content: text } })}\n`;
 const bridgeLine = id => `${JSON.stringify({ type: 'bridge-session', sessionId: 'x', bridgeSessionId: id, lastSequenceNum: 0 })}\n`;
 

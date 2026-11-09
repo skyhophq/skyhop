@@ -92,6 +92,8 @@ Skyhop pushes your code and the session's transcript to a `skyhop-run/...` branc
 - **The first message of the cloud session shows the decryption key.** It only opens this handoff's transcript, which Skyhop deletes from GitHub once the session is home. Don't share that session publicly before then.
 - **With no remote, or with `--no-sync`,** Skyhop uploads the repository directly instead. That upload is capped at 100 MB after compression, may include your other local branches, and nothing comes back to your machine.
 
+**A plane marks the trip.** Once a handoff goes through, a small pixel-art plane carries your session from a laptop into a cloud, just above the prompt. When you pick a session that came back in `/resume`, it flies the session back down. Each takes about four seconds and then shrinks to one line. You need Claude Code 2.1.251 or later and a terminal at least 65 columns wide to see the plane. Narrower terminals and the desktop app show only the line. Older versions of Claude Code skip it, and everything else works the same.
+
 ### Coming home
 
 After each reply, a full-resume session pushes its code and the new messages to `skyhop-sync/...` branches, with the conversation encrypted. If the VM is cleared while it's idle, the session rebuilds its history from those saves.
@@ -180,11 +182,12 @@ The logs hold steps, outcomes, errors and Skyhop's own messages, never your conv
 
 ```bash
 npm test
+claude plugin test .
 claude plugin validate .
 claude --plugin-dir .
 ```
 
-The tests use a stand-in `claude` command and a local bare remote, so they never touch GitHub or the cloud.
+The tests use a stand-in `claude` command and a local bare remote, so they never touch GitHub or the cloud. `claude plugin test .` runs the animation's tests (`test/takeoff.test.tsx`) against Claude Code's plugin engine.
 
 ## License
 

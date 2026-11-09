@@ -112,10 +112,12 @@ function linkedSetup(t) {
 }
 
 test('a line written after the cloud part by a window without it stops the message, and the next start puts the cloud part last', t => {
-  const { hook, localSession, record } = linkedSetup(t);
+  const { hook, localSession, record, home } = linkedSetup(t);
+  const planeHome = path.join(home, `.skyhop/animate/${SESSION}.json`);
   fs.appendFileSync(localSession, STALE_NOTE + BOOKKEEPING);
 
   assert.match(hook('start', resume).systemMessage, /this window doesn't show the session's cloud conversation/);
+  assert.ok(!fs.existsSync(planeHome), 'no plane home in a window that does not show the cloud part');
   const out = hook('prompt', prompt);
   assert.equal(out.decision, 'block');
   assert.match(out.reason, /doesn't show the session's cloud conversation/);
@@ -124,6 +126,7 @@ test('a line written after the cloud part by a window without it stops the messa
   assert.match(hook('start', start).systemMessage, /is in the cloud\. Pick it in \/resume/);
   assert.equal(fs.readFileSync(localSession, 'utf8'), LINKED_LOCAL + STALE_NOTE + BOOKKEEPING + LINKED_CLOUD);
   assert.match(hook('start', resume).systemMessage, /comes home when you send a message/);
+  assert.ok(fs.existsSync(planeHome), 'the plane flies home once the window shows the cloud part');
   assert.match(hook('prompt', prompt).systemMessage, /back from the cloud/);
   assert.equal(fs.readFileSync(localSession, 'utf8'), LINKED_LOCAL + STALE_NOTE + BOOKKEEPING + LINKED_CLOUD);
 });

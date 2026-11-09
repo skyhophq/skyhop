@@ -97,6 +97,25 @@ function markHome(record, home, extra = {}) {
   for (const name of fs.readdirSync(sessionsDir(home))) {
     if (name.startsWith(`${record.sessionId}.`) && name.endsWith('.loaded')) fs.rmSync(path.join(sessionsDir(home), name), { force: true });
   }
+  noteHomecoming(record.sessionId, home, false);
+}
+
+// Tells hooks/takeoff.tsx to fly the plane home: written when a window opens a
+// session whose cloud conversation it shows, and removed otherwise. Claude Code
+// versions without hooks modules just leave it unread.
+export function homecomingFile(sessionId, home = os.homedir()) {
+  return path.join(home, '.skyhop', 'animate', `${sessionId}.json`);
+}
+
+function noteHomecoming(sessionId, home, shown) {
+  const file = homecomingFile(sessionId, home);
+  if (!shown) {
+    fs.rmSync(file, { force: true });
+    return;
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify({ at: Date.now() })}\n`, { mode: 0o600 });
+  privateFile(file);
 }
 
 function when(iso) {
@@ -593,8 +612,15 @@ export function onResume({ sessionId, pid, home = os.homedir() }) {
   }
   const branches = cloudBranches(info, record);
   let line = 'Skyhop: this session was in the cloud. It comes home when you send a message, and the cloud chat closes then.';
-  if (branches?.chat && branches.chat !== record.pulledChat) line = `Skyhop: this session has new messages in the cloud that are not shown here. ${REOPEN}`;
-  else if (!shownHere(sessionId, record)) line = `Skyhop: this window doesn't show the session's cloud conversation. ${REOPEN}`;
+  let shown = true;
+  if (branches?.chat && branches.chat !== record.pulledChat) {
+    line = `Skyhop: this session has new messages in the cloud that are not shown here. ${REOPEN}`;
+    shown = false;
+  } else if (!shownHere(sessionId, record)) {
+    line = `Skyhop: this window doesn't show the session's cloud conversation. ${REOPEN}`;
+    shown = false;
+  }
+  noteHomecoming(sessionId, home, shown);
   log('home', 'opened', { session: shortId(sessionId), github: branches ? 'reached' : 'unreachable', said: line }, home);
   return line;
 }
