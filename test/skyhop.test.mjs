@@ -374,7 +374,7 @@ test('with Remote Control on, the plan and the first cloud message link to the w
   addTranscript(home, '{"type":"user","message":{"content":"hi"}}\n{"type":"bridge-session","sessionId":"s","bridgeSessionId":"cse_01AbcdefghijKLmn","lastSequenceNum":0}\n');
   const result = skyhop(['--full-resume', '--yes']);
   assert.equal(result.status, 0, result.output);
-  assert.match(result.output, /History:\s+the cloud chat links to your whole conversation, in this session's Remote Control entry: https:\/\/claude\.ai\/code\/session_01AbcdefghijKLmn/);
+  assert.match(result.output, /History:\s+the cloud chat (starts with a recap|quotes your last \d+ message\(s\) word for word), and links to your whole conversation in this session's Remote Control entry: https:\/\/claude\.ai\/code\/session_01AbcdefghijKLmn/);
   assert.match(fs.readFileSync(path.join(base, 'prompt'), 'utf8'), /--- Where we left off[^\n]*\n\nYour whole conversation from your computer[^\n]*session_01AbcdefghijKLmn\n\n## Goal/);
   assert.match(fs.readFileSync(path.join(home, '.skyhop/logs/skyhop.log'), 'utf8'), / history="remote control link"/);
 });
@@ -383,7 +383,7 @@ test('without Remote Control, the plan says how to get the link next time', t =>
   const { base, home, skyhop } = setup(t);
   addTranscript(home);
   const result = skyhop(['--full-resume', '--yes']);
-  assert.match(result.output, /History:\s+the cloud chat starts with a recap\. For a link to your whole conversation there, turn on Remote Control first/);
+  assert.match(result.output, /History:\s+the cloud chat (starts with a recap|quotes your last \d+ message\(s\) word for word)\. Remote Control is off, so there's no link to your whole conversation\. To add one, type \/remote-control before going ahead/);
   assert.doesNotMatch(fs.readFileSync(path.join(base, 'prompt'), 'utf8'), /Remote Control entry/);
 });
 

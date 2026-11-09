@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { SkyhopError, tryGit } from './git.mjs';
+import { privateFile } from './log.mjs';
 
 const POLL_MS = 250;
 const BRANCH_POLL_MS = 5000;
@@ -190,5 +191,6 @@ export function readHistory(home = os.homedir()) {
 export function recordHandoff(entry, home = os.homedir()) {
   const file = historyFile(home);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify([...readHistory(home), entry], null, 2)}\n`);
+  fs.writeFileSync(file, `${JSON.stringify([...readHistory(home), entry], null, 2)}\n`, { mode: 0o600 });
+  privateFile(file);
 }

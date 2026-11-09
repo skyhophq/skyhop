@@ -61,7 +61,8 @@ export function setup(t, options) {
   // Runs the real relay in the fake VM, as the hook would. The first call sends the
   // handoff's first message, later calls send `prompt`. The job runs to the end before
   // the hook returns, and this returns what Claude in the chat would show.
-  const cloudWork = (dir, { chat = CLOUD, code = true, prompt, check = true, busyCheck } = {}) => {
+  // `notes` are memory notes the resumed session writes, by name, and null removes one.
+  const cloudWork = (dir, { chat = CLOUD, code = true, prompt, check = true, busyCheck, notes = {} } = {}) => {
     const realHome = process.env.HOME;
     process.env.HOME = path.join(repo.base, 'vm-home');
     try {
@@ -69,6 +70,11 @@ export function setup(t, options) {
         busyCheck?.();
         fs.appendFileSync(path.join(process.env.HOME, '.claude/projects/skyhop-import', `${sessionId}.jsonl`), chat);
         if (code) write(dir, typeof code === 'string' ? code : 'cloud-work.txt', 'made in the cloud\n');
+        for (const [name, text] of Object.entries(notes)) {
+          const file = path.join(process.env.HOME, '.skyhop/memory', sessionId, name);
+          if (text === null) fs.rmSync(file);
+          else write(path.dirname(file), path.basename(file), text);
+        }
         return { status: 0, stdout: JSON.stringify({ type: 'result', result: 'done' }) };
       };
       // A reopened chat hands the message to the new handoff's relay. Here that runs

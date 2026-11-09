@@ -23,6 +23,8 @@ Follow these steps in order.
 
 3. **Confirm.** If the arguments include `--dry-run`, show the plan and stop. If they include `--yes`, go to step 4. Otherwise show the user the plan, including the branch, what will be uploaded and the permission mode, and ask whether to go ahead. Stop if they say no.
 
+   If the plan's History line says Remote Control is off, say so in the same question. The cloud chat will then quote only the last few messages, and there will be no link to the whole conversation. To get the link, the user can type `/remote-control` now and then tell you to go ahead. Step 4 picks up the link by itself. Only the user can turn Remote Control on, so don't try to do it yourself.
+
 4. **Hand off.** Run the same command without `--dry-run` and with `--yes`, and allow up to 10 minutes, because a large upload takes time:
 
    ```bash

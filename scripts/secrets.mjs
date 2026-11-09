@@ -23,6 +23,13 @@ const SENSITIVE_NAMES = new Set([
   '.git-credentials', 'credentials.json', 'secrets.json', 'service-account.json',
 ]);
 
+// The same files as patterns for .git/info/exclude, so git on the cloud machine never
+// offers them for a commit, whoever asks for one.
+export const SENSITIVE_EXCLUDES = [
+  '.env', '.env.*', ...['example', 'sample', 'template', 'dist', 'default', 'defaults'].map(end => `!.env.${end}`),
+  ...SENSITIVE_NAMES, ...['pem', 'key', 'p12', 'pfx', 'jks', 'keystore', 'tfvars'].map(end => `*.${end}`),
+];
+
 export function isSensitivePath(file) {
   const base = path.posix.basename(file).toLowerCase();
   if (/^\.env(\..+)?$/.test(base)) return !/\.(example|sample|template|dist|defaults?)$/.test(base);

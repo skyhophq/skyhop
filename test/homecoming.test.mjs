@@ -344,3 +344,23 @@ test('status lists leftovers, and --clean removes only what is safe', t => {
   assert.equal(run(root, 'branch', '--list', 'skyhop/*'), '');
   assert.ok(bare);
 });
+
+test('code someone else pushed to the code branch is not put in your files', t => {
+  const { root, bare, base, hook, handOff, cloudWork, record } = setup(t);
+  cloudWork(handOff());
+  // Someone with push access swaps the code branch for their own commit.
+  const codeRef = record().sync.codeRef;
+  const other = path.join(base, 'other');
+  run(base, 'clone', '-q', '--branch', codeRef, bare, other);
+  write(other, 'cloud-work.txt', 'not from your cloud session\n');
+  run(other, '-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-qam', 'swap');
+  run(other, 'push', '-q', 'origin', `HEAD:${codeRef}`);
+
+  hook('start', start);
+  hook('start', resume);
+  const out = hook('prompt', prompt);
+  assert.match(out.systemMessage, /The code on GitHub doesn't match what your cloud session saved/);
+  assert.ok(!fs.existsSync(path.join(root, 'cloud-work.txt')));
+  const branch = out.systemMessage.match(/put that code on (\S+)\./)[1];
+  assert.equal(run(root, 'show', `${branch}:cloud-work.txt`), 'not from your cloud session');
+});

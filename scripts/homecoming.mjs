@@ -17,6 +17,8 @@ async function main() {
   // Inside a cloud VM, or the relay's own resumed session, there is nothing to bring home.
   if (process.env.CLAUDE_CODE_REMOTE === 'true' || process.env.SKYHOP_INNER) return;
   if (!fs.existsSync(path.join(home, '.skyhop', 'sessions'))) return;
+  const { privateHome } = await import('./log.mjs');
+  privateHome(home);
 
   let input = '';
   for await (const chunk of process.stdin) input += chunk;

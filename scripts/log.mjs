@@ -98,6 +98,27 @@ export function logDir(home = os.homedir()) {
   return path.join(home, '.skyhop', 'logs');
 }
 
+// ~/.skyhop holds keys, briefs and session copies, so only its owner can open it.
+// Older versions left it open to other accounts on the machine.
+export function privateHome(home = os.homedir()) {
+  const dir = path.join(home, '.skyhop');
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(dir, 0o700);
+  } catch {
+    // the files inside are owner-only too
+  }
+}
+
+// Owner-only, even for a file that already existed with wider permissions.
+export function privateFile(file) {
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch {
+    // best effort
+  }
+}
+
 // The Mac's log, in ~/.skyhop/logs/skyhop.log.
 export function log(area, event, fields = {}, home = os.homedir()) {
   appendLog(path.join(logDir(home), 'skyhop.log'), formatLine(area, event, fields, { home }));

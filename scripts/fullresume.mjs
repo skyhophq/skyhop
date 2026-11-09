@@ -9,7 +9,8 @@ import zlib from 'node:zlib';
 import { git, SkyhopError, tryGit } from './git.mjs';
 import { skyhopVersion } from './log.mjs';
 import { RELAY_COMMIT_MARKER, WAIT_COMMAND } from './relay.mjs';
-import { sealTranscript } from './sync.mjs';
+import { packMemory } from './memory.mjs';
+import { sealMemory, sealTranscript } from './sync.mjs';
 
 // A direct upload is capped at 100 MB after compression, shared with the repository.
 export const MAX_UPLOAD_BYTES = 95 * 1024 * 1024;
@@ -27,7 +28,7 @@ const RELAY_COMMAND = 'node "$CLAUDE_PROJECT_DIR/.skyhop/relay.mjs"';
 const WAIT_RULE = `Bash(${WAIT_COMMAND})`;
 const SCRIPTS = path.dirname(fileURLToPath(import.meta.url));
 // Everything the relay needs in the VM, where the plugin isn't installed.
-export const VM_SCRIPTS = ['log.mjs', 'relay.mjs', 'secrets.mjs', 'sync.mjs'];
+export const VM_SCRIPTS = ['log.mjs', 'memory.mjs', 'relay.mjs', 'secrets.mjs', 'sync.mjs'];
 
 function projectsDir() {
   return path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'projects');
@@ -87,7 +88,8 @@ export function mergeSettings(existing) {
 
 // Returns the size of the transcript copy, which is where /skyhop-back picks up.
 // The live session keeps writing to the original, so this can't be read beforehand.
-export function addRelayCommit(dir, { transcript, sessionId, mode, brief, sync, key }) {
+// `memory` is the project's notes, or null when auto memory is off on this Mac.
+export function addRelayCommit(dir, { transcript, sessionId, mode, brief, sync, key, memory = null }) {
   const skyhop = path.join(dir, '.skyhop');
   fs.mkdirSync(skyhop, { recursive: true });
   const bytes = fs.readFileSync(transcript.path);
@@ -98,11 +100,15 @@ export function addRelayCommit(dir, { transcript, sessionId, mode, brief, sync, 
   } else {
     fs.writeFileSync(path.join(skyhop, 'session.jsonl'), bytes);
   }
+  if (memory && sync) fs.writeFileSync(path.join(skyhop, 'memory.enc'), sealMemory(packMemory(memory), key));
+  else if (memory) fs.writeFileSync(path.join(skyhop, 'memory.json'), packMemory(memory));
   for (const script of VM_SCRIPTS) fs.copyFileSync(path.join(SCRIPTS, script), path.join(skyhop, script));
   fs.writeFileSync(path.join(skyhop, 'session-id'), `${sessionId}\n`);
   fs.writeFileSync(path.join(skyhop, 'version'), `${skyhopVersion()}\n`);
   fs.writeFileSync(path.join(skyhop, 'mode'), `${mode}\n`);
-  fs.writeFileSync(path.join(skyhop, 'brief.md'), `${brief}\n`);
+  // With sync on, the start branch is on GitHub, where everything about the
+  // conversation is encrypted. The brief is in the chat's first message anyway.
+  if (!sync) fs.writeFileSync(path.join(skyhop, 'brief.md'), `${brief}\n`);
   if (sync) fs.writeFileSync(path.join(skyhop, 'sync.json'), JSON.stringify({ ...sync, baseBytes: bytes.length }));
 
   const settingsFile = path.join(dir, '.claude/settings.json');

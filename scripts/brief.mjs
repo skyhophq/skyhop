@@ -1,7 +1,7 @@
 // Turns the brief Claude wrote into the first prompt of the cloud session.
 import fs from 'node:fs';
 import { SkyhopError } from './git.mjs';
-import { redactPaths } from './log.mjs';
+import { privateFile, redactPaths } from './log.mjs';
 
 // Linux limits a single argument to 128 KB.
 export const MAX_PROMPT_BYTES = 100 * 1024;
@@ -18,6 +18,7 @@ export { redactPaths };
 export function loadBrief(file) {
   if (!file) throw new SkyhopError('No brief was given.', 'Run this through /skyhop, which writes the brief first.');
   if (!fs.existsSync(file)) throw new SkyhopError(`The brief file was not found: ${file}`, 'Run /skyhop again so Claude can write it.');
+  privateFile(file);
   const brief = redactPaths(fs.readFileSync(file, 'utf8')).trim();
   if (!brief) throw new SkyhopError('The brief is empty.', 'Run /skyhop again so Claude can write it.');
   return brief;
@@ -62,8 +63,22 @@ export function historyNote(entry) {
 
 // The first message of the cloud chat: the instruction for the resumed session,
 // then a recap the user can read, since the chat can't show the old messages.
-export function resumePrompt(project, brief, entry = null) {
-  return fitPrompt(`${resumeMessage(project)}\n\n${RECAP_START}\n\n${historyNote(entry)}${brief}\n\n${RECAP_END}`);
+// In a full resume the recap quotes the session itself, so the brief's own account
+// of the recent conversation goes, up to the next heading at its level or above.
+export function withoutRecentSection(brief) {
+  const match = brief.match(/^(#{1,6})\s*\**Recent conversation\b.*$/im);
+  if (!match) return brief;
+  const rest = brief.slice(match.index + match[0].length);
+  const next = rest.search(new RegExp(`^#{1,${match[1].length}}\\s`, 'm'));
+  return `${brief.slice(0, match.index)}${next >= 0 ? rest.slice(next) : ''}`.trim();
+}
+
+function recapBody(brief, recent) {
+  return recent ? `${withoutRecentSection(brief)}\n\n${recent}` : brief;
+}
+
+export function resumePrompt(project, brief, entry = null, recent = '') {
+  return fitPrompt(`${resumeMessage(project)}\n\n${RECAP_START}\n\n${historyNote(entry)}${recapBody(brief, recent)}\n\n${RECAP_END}`);
 }
 
 // For a chat that already exists, Skyhop's relay takes the message before Claude in
@@ -71,6 +86,6 @@ export function resumePrompt(project, brief, entry = null) {
 // from starting work on its own. The resumed session never sees the recap.
 export const RECONNECT_NOTE = 'Note for Claude in this chat: this message reconnects the chat to a Skyhop session. If it reaches you with no Skyhop relay reply attached, the reconnection failed. Do not start any work. Reply only that Skyhop could not reconnect this chat, and that running /skyhop --new-chat on the computer starts a new one.';
 
-export function reconnectPrompt(project, brief, entry = null) {
-  return fitPrompt(`${resumeMessage(project)}\n\n${RECAP_START}\n\n${RECONNECT_NOTE}\n\n${historyNote(entry)}${brief}\n\n${RECAP_END}`);
+export function reconnectPrompt(project, brief, entry = null, recent = '') {
+  return fitPrompt(`${resumeMessage(project)}\n\n${RECAP_START}\n\n${RECONNECT_NOTE}\n\n${historyNote(entry)}${recapBody(brief, recent)}\n\n${RECAP_END}`);
 }

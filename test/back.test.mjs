@@ -45,7 +45,25 @@ test('the key never reaches GitHub', t => {
   assert.ok(!everything.includes(record.sync.key));
   assert.ok(!everything.includes('from my phone'));
   assert.ok(!everything.includes('before the handoff'));
+  // The brief stays off GitHub too: the chat's first message has it.
+  assert.ok(!everything.includes('Ship it.'));
   assert.equal(fs.statSync(path.join(home, `.skyhop/sessions/${SESSION}.json`)).mode & 0o777, 0o600);
+});
+
+test('~/.skyhop and the files Skyhop keeps there are private, even ones older versions left open', t => {
+  const { home, briefFile, handOff, cloudWork, hook } = setup(t);
+  fs.chmodSync(path.join(home, '.skyhop'), 0o755);
+  fs.chmodSync(briefFile, 0o644);
+  write(home, `.skyhop/sessions/${SESSION}.json`, '{}');
+  fs.chmodSync(path.join(home, `.skyhop/sessions/${SESSION}.json`), 0o644);
+  cloudWork(handOff());
+  hook('start', { source: 'startup', session_id: 'aaaaaaaa-0000-4000-8000-000000000000' });
+  const mode = file => fs.statSync(path.join(home, file)).mode & 0o777;
+  assert.equal(mode('.skyhop'), 0o700);
+  assert.equal(mode('.skyhop/briefs/brief.md'), 0o600);
+  assert.equal(mode(`.skyhop/sessions/${SESSION}.json`), 0o600);
+  assert.equal(mode('.skyhop/history.json'), 0o600);
+  assert.equal(mode(`.skyhop/backups/${SESSION}.jsonl`), 0o600);
 });
 
 test('the round trip adds the cloud conversation to the same session and brings the code', t => {
@@ -366,4 +384,15 @@ test('a typed message or a cut-off line after the cloud part is never moved', t 
   }
   // Handoffs pulled before Skyhop tracked the cloud part count as shown, as before.
   assert.equal(cloudShown(file, {}), true);
+});
+
+test("the cloud's own commit nudge can't pick up sensitive files, and the chat is told not to push", async t => {
+  const { handOff, cloudWork } = setup(t);
+  const vm = handOff();
+  cloudWork(vm);
+  for (const file of ['.env', '.env.local', 'deploy.key', 'config/secrets.json', '.env.example', 'notes.txt']) write(vm, file, 'x\n');
+  const offered = run(vm, 'status', '--porcelain', '--untracked-files=all').split('\n').map(line => line.slice(3)).filter(Boolean);
+  assert.deepEqual(offered.filter(file => file !== 'cloud-work.txt').sort(), ['.env.example', 'notes.txt']);
+  const { relayOutput } = await import('../scripts/relay.mjs');
+  assert.match(relayOutput('done', () => '').hookSpecificOutput.additionalContext, /Do not commit or push anything, even if a hook asks you to/);
 });

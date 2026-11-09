@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { unpackMemory } from './memory.mjs';
 
 export const KEY_PATTERN = /\[skyhop-key:([A-Za-z0-9+/=]+)\]/;
 // GitHub refuses files over 100 MB, so a long transcript goes up in parts.
@@ -37,6 +38,23 @@ function chunkName(seq) {
 // bug report from the Mac can include what happened in the cloud.
 const LOG_NAME = 'log.enc';
 const LOG_SEQ = 'log';
+// The project's memory notes go up with the handoff and come back with the saves.
+export const MEMORY_NAME = 'memory.enc';
+const MEMORY_SEQ = 'memory';
+
+export function sealMemory(bytes, key) {
+  return sealChunk({ from: 0, to: 0, bytes }, key, MEMORY_SEQ);
+}
+
+export function openMemory(data, key) {
+  return openChunk(data, key, MEMORY_SEQ).bytes;
+}
+
+// Which code the cloud saved, sealed with the conversation. Anyone who can push to
+// the repository could change the code branch, so the Mac checks it against this
+// before the code goes into the user's files.
+const CODE_NAME = 'code.enc';
+const CODE_SEQ = 'code';
 
 export function sealChunk({ from, to, bytes }, key, seq) {
   const plain = zlib.gzipSync(Buffer.concat([Buffer.from(`${JSON.stringify({ from, to })}\n`), bytes]));
@@ -223,8 +241,10 @@ export function markBusy(root, open) {
 // only moves forward after a successful push, so a failed save retries next time.
 // The log only goes up with new conversation, because the Mac reads any move of the
 // chat branch as new messages.
+const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+
 export function saveProgress({
-  root, transcript, isExcluded = () => false, scan = () => [], timeout = PUSH_TIMEOUT_MS, busy = null, log = null,
+  root, transcript, isExcluded = () => false, scan = () => [], timeout = PUSH_TIMEOUT_MS, busy = null, log = null, memory = null,
 }) {
   const skyhop = path.join(root, '.skyhop');
   const config = readJson(path.join(skyhop, 'sync.json'));
@@ -238,22 +258,7 @@ export function saveProgress({
   const refspecs = [];
   const warnings = [];
 
-  // A busy commit from an earlier save that failed is built on too, so the pulse
-  // branch can still catch up.
-  const pulse = busy ?? readPulse(skyhop);
-  const chunk = newLines(transcript, state.sentBytes);
-  if (chunk) {
-    next.seq = state.seq + 1;
-    next.sentBytes = chunk.to;
-    const files = [[chunkName(next.seq), sealChunk(chunk, key, next.seq)]];
-    if (log) files.push([LOG_NAME, sealChunk({ from: 0, to: 0, bytes: Buffer.from(log) }, key, LOG_SEQ)]);
-    next.chatTip = commitFiles(root, pulse ?? state.chatTip, files);
-  } else if (pulse) {
-    next.chatTip = pulse;
-  }
-  if (next.chatTip !== state.chatTip) refspecs.push(`${next.chatTip}:refs/heads/${config.chatRef}`);
-  if (pulse && refspecs.length > 0) refspecs.push(`${next.chatTip}:refs/heads/${pulseRef(config.chatRef)}`);
-
+  // The code is saved first, so the chat commit can seal which code it was.
   const tree = codeTree(root, isExcluded);
   if (tree !== state.codeTree) {
     const diff = String(git(root, ['diff', '--unified=0', '--no-color', '--no-ext-diff', '--no-textconv', state.codeTree, tree]).stdout);
@@ -266,6 +271,30 @@ export function saveProgress({
       refspecs.push(`${next.codeTip}:refs/heads/${config.codeRef}`);
     }
   }
+
+  // A busy commit from an earlier save that failed is built on too, so the pulse
+  // branch can still catch up.
+  const pulse = busy ?? readPulse(skyhop);
+  const chunk = newLines(transcript, state.sentBytes);
+  if (chunk) {
+    next.seq = state.seq + 1;
+    next.sentBytes = chunk.to;
+    const files = [[chunkName(next.seq), sealChunk(chunk, key, next.seq)]];
+    if (log) files.push([LOG_NAME, sealChunk({ from: 0, to: 0, bytes: Buffer.from(log) }, key, LOG_SEQ)]);
+    // Notes ride along only with new messages, because the Mac reads any move of
+    // the chat branch as new messages. A commit keeps its parent's files, so notes
+    // saved earlier stay on the branch.
+    if (memory && digest(memory) !== state.memoryHash) {
+      files.push([MEMORY_NAME, sealMemory(memory, key)]);
+      next.memoryHash = digest(memory);
+    }
+    files.push([CODE_NAME, sealChunk({ from: 0, to: 0, bytes: Buffer.from(JSON.stringify({ tree: next.codeTree })) }, key, CODE_SEQ)]);
+    next.chatTip = commitFiles(root, pulse ?? state.chatTip, files);
+  } else if (pulse) {
+    next.chatTip = pulse;
+  }
+  if (next.chatTip !== state.chatTip) refspecs.push(`${next.chatTip}:refs/heads/${config.chatRef}`);
+  if (pulse && refspecs.some(spec => spec.endsWith(config.chatRef))) refspecs.push(`${next.chatTip}:refs/heads/${pulseRef(config.chatRef)}`);
 
   if (refspecs.length > 0) {
     const failure = pushRefs(root, config, refspecs, timeout);
@@ -300,6 +329,29 @@ export function readCloudLog(root, sha, key) {
   if (run.status !== 0) return null;
   try {
     return openChunk(run.stdout, key, LOG_SEQ).bytes.toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+// The code tree the cloud last saved, as sealed with the conversation, or null.
+export function readSealedCodeTree(root, sha, key) {
+  const run = git(root, ['cat-file', 'blob', `${sha}:${CODE_NAME}`], { encoding: 'buffer' });
+  if (run.status !== 0) return null;
+  try {
+    return JSON.parse(openChunk(run.stdout, key, CODE_SEQ).bytes.toString('utf8')).tree ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// The memory notes as of the last save, or null when none were saved. Notes that
+// don't open are left out rather than stop the session coming home.
+export function readSavedMemory(root, sha, key) {
+  const run = git(root, ['cat-file', 'blob', `${sha}:${MEMORY_NAME}`], { encoding: 'buffer' });
+  if (run.status !== 0) return null;
+  try {
+    return unpackMemory(openMemory(run.stdout, key));
   } catch {
     return null;
   }

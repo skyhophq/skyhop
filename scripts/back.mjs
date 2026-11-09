@@ -21,9 +21,10 @@ import { redactPaths } from './brief.mjs';
 import { readHistory } from './cloud.mjs';
 import { findTranscript } from './fullresume.mjs';
 import { createSnapshot, git, repoInfo, skyhopBranch, SkyhopError, tryGit } from './git.mjs';
-import { log, logDir, shortId } from './log.mjs';
+import { log, logDir, privateFile, shortId } from './log.mjs';
+import { applyCloudMemory, describeMemory } from './memory.mjs';
 import { isSensitivePath } from './secrets.mjs';
-import { pulseRef, readChunks, readCloudLog } from './sync.mjs';
+import { pulseRef, readChunks, readCloudLog, readSavedMemory, readSealedCodeTree } from './sync.mjs';
 
 const CHAT_REF = 'refs/skyhop/back-chat';
 const CODE_REF = 'refs/skyhop/back-code';
@@ -51,6 +52,7 @@ function readJson(file) {
 export function saveHandoffRecord(record, home = os.homedir()) {
   fs.mkdirSync(sessionsDir(home), { recursive: true });
   fs.writeFileSync(recordFile(record.sessionId, home), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+  privateFile(recordFile(record.sessionId, home));
 }
 
 export function readRecord(sessionId, home = os.homedir()) {
@@ -356,7 +358,22 @@ function download(info, record, branches, home) {
   const saved = chatSha ? readSaved(info, chatSha, record) : { bytes: Buffer.alloc(0), to: record.baseBytes, count: 0 };
   const lines = assertValidLines(saved.bytes);
   const known = (record.pulledTo ?? record.baseBytes) - record.baseBytes;
-  return { chatSha, codeSha, all: saved.bytes, fresh: saved.bytes.subarray(known), to: saved.to, count: saved.count, lines };
+  const memory = chatSha && record.memory ? readSavedMemory(info.root, chatSha, record.sync.key) : null;
+  const sealedTree = chatSha ? readSealedCodeTree(info.root, chatSha, record.sync.key) : null;
+  return { chatSha, codeSha, all: saved.bytes, fresh: saved.bytes.subarray(known), to: saved.to, count: saved.count, lines, memory, sealedTree };
+}
+
+// The cloud's changes to the project's memory notes, merged into this Mac's folder.
+// Returns a line for the user, or null, and the record fields to keep.
+function bringMemory(record, got, home) {
+  if (!record.memory || !got.memory) return { line: null, changed: [], fields: {} };
+  const aside = path.join(home, '.skyhop', 'memory-aside', record.sessionId);
+  const done = applyCloudMemory({ dir: record.memory.dir, base: record.memory.base, cloud: got.memory, aside });
+  return {
+    line: describeMemory(done, redactPaths(aside)),
+    changed: [...done.added, ...done.updated, ...done.removed],
+    fields: { memory: { ...record.memory, base: done.base } },
+  };
 }
 
 function dropDownloads(info) {
@@ -378,6 +395,7 @@ function backupSession(file, sessionId, home) {
   fs.mkdirSync(dir, { recursive: true });
   const backup = path.join(dir, `${sessionId}.jsonl`);
   fs.copyFileSync(file, backup);
+  privateFile(backup);
   return backup;
 }
 
@@ -436,11 +454,18 @@ function applyTree(info, from, to) {
 
 // The cloud's changes land in the user's files, uncommitted, when that can't
 // overwrite anything: the files must still match the handoff exactly. Otherwise
-// they wait on a new branch.
-function bringCode(info, record, sha, dryRun) {
+// they wait on a new branch. So does code that isn't the code the cloud sealed with
+// the conversation, which anyone who can push to the repository could have put there.
+function bringCode(info, record, sha, dryRun, sealedTree) {
   if (!sha) return { kind: 'none' };
   const tree = git(info.root, ['rev-parse', `${sha}^{tree}`]);
   if (tree === record.snapshotTree) return { kind: 'none' };
+  if (record.codeSealed && tree !== sealedTree) {
+    if (dryRun) return { kind: 'unverified', branch: 'a new skyhop/back-... branch' };
+    const branch = skyhopBranch('back');
+    git(info.root, ['branch', branch, sha]);
+    return { kind: 'unverified', branch };
+  }
   const here = info.branch ?? 'your detached HEAD';
   const unchanged = localFilesUnchanged(info, record);
   if (dryRun) return unchanged ? { kind: 'apply', branch: here } : { kind: 'branch', branch: 'a new skyhop/back-... branch' };
@@ -453,6 +478,7 @@ function bringCode(info, record, sha, dryRun) {
 function describeCode(code) {
   if (code.kind === 'apply') return `The cloud's code changes are in your files on ${code.branch}, not committed.`;
   if (code.kind === 'branch') return `The cloud's code is on ${code.branch}. Your local files changed since the handoff, so Skyhop left them alone. Run: git switch ${code.branch}`;
+  if (code.kind === 'unverified') return `The code on GitHub doesn't match what your cloud session saved, so someone else may have changed it. Skyhop left your files alone and put that code on ${code.branch}. Check it before using it: git diff HEAD ${code.branch}`;
   return 'The cloud session made no code changes.';
 }
 
@@ -509,8 +535,10 @@ function pullOne(info, record, heads, home) {
     return `Skyhop: ${name} has new messages in the cloud, but a window opened it while they were downloading. Quit that window, then open claude here again.`;
   }
   fs.appendFileSync(file, got.fresh);
+  const notes = bringMemory(record, got, home);
   saveHandoffRecord({
     ...record,
+    ...notes.fields,
     backup,
     pulledTo: got.to,
     pulledChat: got.chatSha,
@@ -519,7 +547,8 @@ function pullOne(info, record, heads, home) {
     blocks: [...(record.blocks ?? []), [size, size + got.fresh.length]],
     cloudLeaf: lastUuid(got.fresh) ?? record.cloudLeaf,
   }, home);
-  return `Skyhop: ${name} now has its cloud conversation here (${typedTurns(got.fresh)} new message(s)).${working} Pick it in /resume. It comes home for good when you send a message there, and the cloud chat closes then.`;
+  const memoryNote = notes.line ? ` ${notes.line}` : '';
+  return `Skyhop: ${name} now has its cloud conversation here (${typedTurns(got.fresh)} new message(s)).${working} Pick it in /resume. It comes home for good when you send a message there, and the cloud chat closes then.${memoryNote}`;
 }
 
 // A window that opened the session before its cloud part arrived, and wrote to it
@@ -638,16 +667,22 @@ function claimHere(info, record, pid, home) {
   }
   // The user typed here while the cloud kept going, so the cloud part becomes its own session.
   const forked = hasNew ? forkSession(file, sessionId, localEnd(record), got.fresh) : null;
-  markHome(record, home, forked ? { resumeId: forked.newId } : {});
-  const code = bringCode(info, record, got.codeSha, false);
+  const notes = bringMemory(record, got, home);
+  markHome(record, home, { ...(forked ? { resumeId: forked.newId } : {}), ...notes.fields });
+  const code = bringCode(info, record, got.codeSha, false, got.sealedTree);
   tidyRemote(info, record, got);
 
   const parts = [
     'Skyhop: this session is back from the cloud, and its cloud chat is closed.',
     forked ? `The cloud had new messages too, so they are in a separate session: claude --resume ${forked.newId}` : null,
     code.kind === 'none' ? null : describeCode(code),
+    notes.line,
   ].filter(Boolean);
-  const context = code.kind === 'none' ? null : `Skyhop: this session just came back from a Claude Code cloud session. ${describeCode(code)}`;
+  const facts = [
+    code.kind === 'none' ? null : describeCode(code),
+    notes.changed.length > 0 ? `Memory notes the cloud session changed are now in the memory folder, newer than what this window loaded: ${notes.changed.join(', ')}.` : null,
+  ].filter(Boolean);
+  const context = facts.length > 0 ? `Skyhop: this session just came back from a Claude Code cloud session. ${facts.join(' ')}` : null;
   return allow(parts.join(' '), context);
 }
 
@@ -724,7 +759,7 @@ function bringBackRecord(info, record, dryRun, home) {
   console.log(`Saved in the cloud: ${got.count} message turn(s), ${got.lines} transcript record(s).`);
 
   if (dryRun) {
-    const code = bringCode(info, record, got.codeSha, true);
+    const code = bringCode(info, record, got.codeSha, true, got.sealedTree);
     console.log(fork
       ? `Conversation: would become a new session, because you typed ${typed} message(s) in it after the handoff.`
       : 'Conversation: would be added to your original session.');
@@ -742,8 +777,9 @@ function bringBackRecord(info, record, dryRun, home) {
     if (hidden) putCloudLast(file, record);
     if (got.fresh.length > 0) fs.appendFileSync(file, got.fresh);
   }
-  markHome(record, home, { resumeId, backup });
-  const code = bringCode(info, record, got.codeSha, false);
+  const notes = bringMemory(record, got, home);
+  markHome(record, home, { resumeId, backup, ...notes.fields });
+  const code = bringCode(info, record, got.codeSha, false, got.sealedTree);
   tidyRemote(info, record, got);
   log('back', 'brought home', { session: shortId(record.sessionId), turns: got.count, conversation: fork ? 'new session' : 'same session', code: code.kind }, home);
 
@@ -751,6 +787,7 @@ function bringBackRecord(info, record, dryRun, home) {
     ? `\nThe cloud conversation is in a new session, because you typed ${typed} message(s) in it after the handoff. Your original session wasn't changed.`
     : '\nThe cloud conversation is now in your original session.');
   console.log(describeCode(code));
+  if (notes.line) console.log(notes.line);
   console.log('The cloud chat is closed, so messages sent there no longer reach this session.');
   console.log(`Backup of the original session: ${redactPaths(backup)}`);
   console.log(`\nTo carry on, type /resume and pick it, or run:\n\nclaude --resume ${resumeId}`);

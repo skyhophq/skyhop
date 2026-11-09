@@ -14,12 +14,14 @@ import {
   launchSession, launchTimes, pasteCommand, readHistory, recordHandoff, reopenWaitMs, requireSignIn, sendToChat, waitForBranch,
 } from './cloud.mjs';
 import { addRelayCommit, findTranscript, LARGE_TRANSCRIPT_BYTES, measureUpload } from './fullresume.mjs';
+import { MAX_MEMORY_BYTES, memoryDir, memoryEnabled, memoryHashes, readMemory } from './memory.mjs';
+import { recentConversation } from './conversation.mjs';
 import {
   createSnapshot, git, maskUrl, pendingCommitCount, pendingDiff, prepareLaunchFolder, publicRemoteUrl,
   pushBranch, removeLaunchFolder, repoBytes, repoInfo, skyhopBranch, SkyhopError, snapshotStat, tryGit,
 } from './git.mjs';
 import { findLeftovers, formatLeftovers, removeLeftovers } from './leftovers.mjs';
-import { log, logDir, skyhopVersion } from './log.mjs';
+import { log, logDir, privateFile, privateHome, skyhopVersion } from './log.mjs';
 import { formatFinding, isSensitivePath, scanDiff, scanText } from './secrets.mjs';
 import { newKey, pulseRef } from './sync.mjs';
 
@@ -65,7 +67,24 @@ function syncEnabled(info, options) {
   return Boolean(info.remoteUrl) && !options['no-sync'];
 }
 
-function printPlan({ info, branch, snapshot, pending, options, transcript, reuse, remote }) {
+// The project's memory notes, which go along with a full resume. Null when auto
+// memory is off here, and `tooBig` when they're over the limit and stay behind.
+function handoffMemory(transcriptPath, root) {
+  if (!memoryEnabled({ root })) return null;
+  const dir = memoryDir({ transcriptPath, root });
+  const { files, bytes } = readMemory(dir);
+  return { dir, files, count: Object.keys(files).length, tooBig: bytes > MAX_MEMORY_BYTES };
+}
+
+function memoryLine(memory) {
+  if (!memory) return '  Memory:     auto memory is off here, so no notes go along';
+  if (memory.tooBig) return "  Memory:     this project's memory notes are over 1 MB, so they stay here";
+  return memory.count > 0
+    ? `  Memory:     ${memory.count} memory note(s) from this project go along, encrypted, and the cloud's changes come back`
+    : '  Memory:     no memory notes for this project yet. Notes the cloud session saves come back';
+}
+
+function printPlan({ info, branch, snapshot, pending, options, transcript, reuse, remote, memory, recent }) {
   const fullResume = options['full-resume'];
   const lines = [
     'Skyhop plan',
@@ -92,10 +111,12 @@ function printPlan({ info, branch, snapshot, pending, options, transcript, reuse
           '  Sync:       off, so /skyhop-back will have nothing to bring home',
         ]),
     );
+    const quoted = recent.count > 0 ? `quotes your last ${recent.count} message(s) word for word` : 'starts with a recap';
     lines.push(remote
-      ? `  History:    the cloud chat links to your whole conversation, in this session's Remote Control entry: ${remote.url}`
-      : '  History:    the cloud chat starts with a recap. For a link to your whole conversation there, turn on Remote Control first: /remote-control, or "Enable Remote Control for all sessions" in /config');
+      ? `  History:    the cloud chat ${quoted}, and links to your whole conversation in this session's Remote Control entry: ${remote.url}`
+      : `  History:    the cloud chat ${quoted}. Remote Control is off, so there's no link to your whole conversation. To add one, type /remote-control before going ahead`);
     if (remote?.missing) lines.push(`              Remote Control was off for your last ${remote.missing} messages, so that entry may not show them.`);
+    lines.push(memoryLine(memory));
     if (transcript.bytes >= LARGE_TRANSCRIPT_BYTES) lines.push('  Warning:    long sessions use more of your plan on every message.');
   } else {
     lines.push(
@@ -129,11 +150,12 @@ function chooseBranch(options, info) {
   return withoutStamp(saved) === withoutStamp(fresh) ? saved : fresh;
 }
 
-function findSecrets({ info, snapshot, prompt, transcript }) {
+function findSecrets({ info, snapshot, prompt, transcript, notes }) {
   return [
     ...scanDiff(pendingDiff(info.root, snapshot.sha, info.remote)),
     ...scanText(prompt, { source: 'brief' }),
     ...(transcript ? scanText(fs.readFileSync(transcript.path, 'utf8'), { source: 'session transcript', strict: true }) : []),
+    ...Object.entries(notes ?? {}).flatMap(([name, text]) => scanText(text, { source: `memory note ${name}` })),
   ];
 }
 
@@ -147,6 +169,7 @@ async function confirm() {
 function savePrompt(briefFile, prompt) {
   const file = `${briefFile}.prompt.md`;
   fs.writeFileSync(file, prompt, { mode: 0o600 });
+  privateFile(file);
   return file;
 }
 
@@ -233,7 +256,10 @@ async function handoff(options) {
   // chat's relay can switch to a new handoff.
   const reuse = !options['new-chat'] && earlier?.cloud?.reopen ? earlier.cloud : null;
   const remote = fullResume ? remoteControlEntry(transcript.path) : null;
-  const prompt = fullResume ? resumePrompt(project, brief, remote) : briefPrompt(brief, project);
+  const memory = fullResume ? handoffMemory(transcript.path, info.root) : null;
+  const notes = memory && !memory.tooBig ? memory.files : null;
+  const recent = fullResume ? recentConversation(transcript.path) : { section: '', count: 0 };
+  const prompt = fullResume ? resumePrompt(project, brief, remote, recent.section) : briefPrompt(brief, project);
   const branch = chooseBranch(options, info);
   const snapshot = createSnapshot(info, {
     isExcluded: isSensitivePath,
@@ -243,7 +269,7 @@ async function handoff(options) {
   const repoSize = fullResume && !useSync ? repoBytes(info.root, snapshot.sha) : 0;
   if (fullResume && !useSync) transcript.compressed = measureUpload(transcript, repoSize);
 
-  printPlan({ info, branch, snapshot, pending, options, transcript, reuse, remote });
+  printPlan({ info, branch, snapshot, pending, options, transcript, reuse, remote, memory, recent });
   log('handoff', 'plan', {
     repo: project,
     remote: info.remote ? 'yes' : 'none',
@@ -254,9 +280,11 @@ async function handoff(options) {
     'left-out': snapshot.excluded.length || null,
     transcript: transcript ? `${(transcript.bytes / 1e6).toFixed(1)}MB` : null,
     history: fullResume ? (remote ? 'remote control link' : 'recap only') : null,
+    quoted: fullResume ? recent.count : null,
+    memory: fullResume ? (memory ? (memory.tooBig ? 'too big' : `${memory.count} note(s)`) : 'off') : null,
   });
 
-  const findings = findSecrets({ info, snapshot, prompt, transcript });
+  const findings = findSecrets({ info, snapshot, prompt, transcript, notes });
   log('handoff', 'secret scan', {
     found: findings.length,
     rules: [...new Set(findings.map(finding => finding.rule))].join(','),
@@ -274,7 +302,7 @@ async function handoff(options) {
 
   if (options['dry-run']) {
     log('handoff', 'dry run, nothing sent');
-    console.log(`\nDry run: nothing was pushed or started.\n\n--- First prompt ---\n${reuse ? reconnectPrompt(project, brief, remote) : prompt}`);
+    console.log(`\nDry run: nothing was pushed or started.\n\n--- First prompt ---\n${reuse ? reconnectPrompt(project, brief, remote, recent.section) : prompt}`);
     return 0;
   }
   if (!options.yes) {
@@ -312,10 +340,12 @@ async function handoff(options) {
         remoteUrl: publicRemoteUrl(info.remoteUrl), snapshotTree: snapshot.tree, finalBranch: branch,
       }
       : null;
-    const baseBytes = addRelayCommit(dir, { transcript, sessionId: options.session, mode: options.mode, brief, sync, key });
+    const baseBytes = addRelayCommit(dir, { transcript, sessionId: options.session, mode: options.mode, brief, sync, key, memory: notes });
     handoffRecord = {
       sessionId: options.session, repoRoot: info.root, at: new Date().toISOString(), branch, baseBytes,
       head: info.head, snapshotTree: snapshot.tree, sync: sync && { ...sync, key },
+      memory: notes && { dir: memory.dir, base: memoryHashes(notes) },
+      codeSealed: Boolean(sync),
     };
     saveHandoffRecord(handoffRecord);
     if (useSync) {
@@ -333,7 +363,9 @@ async function handoff(options) {
     pushed: !fullResume || useSync,
   };
   if (reuse) {
-    const reconnect = `${reconnectPrompt(project, brief, remote)}\n\n[skyhop-key:${key}]\n[skyhop-reopen:${startBranch}]`;
+    // The relay only switches to exactly the commit pushed here.
+    const pushed = git(dir, ['rev-parse', 'HEAD']);
+    const reconnect = `${reconnectPrompt(project, brief, remote, recent.section)}\n\n[skyhop-key:${key}]\n[skyhop-reopen:${startBranch}]\n[skyhop-reopen-commit:${pushed}]`;
     const sent = sendToChat(reuse.sessionId, reconnect);
     log('handoff', sent.ok ? 'sent to the earlier chat' : 'the earlier chat refused it', { chat: reuse.sessionId, error: sent.error });
     if (sent.ok) {
@@ -405,6 +437,7 @@ function showStatus({ clean }) {
 }
 
 async function main() {
+  privateHome();
   const options = readOptions(process.argv.slice(2));
   if (options.back) return bringBack({ session: options.session, dryRun: options['dry-run'] });
   return options.status || options.clean ? showStatus(options) : handoff(options);

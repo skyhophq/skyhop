@@ -158,3 +158,28 @@ test('a reopen that cannot find its handoff says so and changes nothing', t => {
   assert.equal(run(vm, 'rev-parse', 'HEAD'), head);
   assert.ok(fs.existsSync(path.join(vm, '.skyhop/relay.mjs')));
 });
+
+test('a reopen message without the chat key, or for a branch that moved since the push, changes nothing', t => {
+  const repo = setup(t);
+  const { base, bare, vm, handOffAgain, cloudWork } = repo;
+  const first = firstTrip(repo);
+  handOffAgain();
+  const message = fs.readFileSync(path.join(base, 'prompt'), 'utf8');
+  assert.match(message, /\[skyhop-reopen-commit:[0-9a-f]{40}\]/);
+  write(vm, 'cloud-scratch.txt', 'still here\n');
+
+  const pasted = message.replace(/\[skyhop-key:[^\]]+\]/, '');
+  assert.match(cloudWork(vm, { prompt: pasted, check: false }), /could not reconnect this chat to the session \(the message did not carry this chat's key\)/);
+  assert.ok(fs.existsSync(path.join(vm, 'cloud-scratch.txt')));
+
+  // Someone with push access moves the start branch after the Mac pushed it.
+  const other = path.join(base, 'other');
+  run(base, 'clone', '-q', '--branch', first.sync.runBranch, bare, other);
+  write(other, 'planted.txt', 'x\n');
+  run(other, 'add', '-A');
+  run(other, '-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-qm', 'planted\n\nskyhop-relay-commit');
+  run(other, 'push', '-q', 'origin', `HEAD:${first.sync.runBranch}`);
+  assert.match(cloudWork(vm, { prompt: message, check: false }), /has changed since your computer pushed it/);
+  assert.ok(fs.existsSync(path.join(vm, 'cloud-scratch.txt')));
+  assert.ok(!fs.existsSync(path.join(vm, 'planted.txt')));
+});
