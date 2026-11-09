@@ -6,10 +6,12 @@
 //   - claim, on the session's next message on this Mac. Typing here means the user
 //     is back, so the cloud chat closes and the code comes home.
 //   - bringBack, for /skyhop-back, which does both at once from another window.
-// A window reads a session file only when it opens it, and history added after that
-// stays hidden behind whatever the window writes next. So nothing is added to a
-// session that's open, and a window that opened it too early is stopped before it
-// writes anything.
+// A window reads a session file only when it opens it, and Claude Code carries on
+// from the last conversation line in the file. So a line written by a window that
+// opened the session before its cloud part arrived hides that part, even Skyhop's own
+// note when it stops a message there. Nothing is added to a session that's open, a
+// window that doesn't show the cloud part can't bring the session home, and the next
+// start moves such lines in front of the cloud part.
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -112,10 +114,10 @@ function listHeads(info) {
   }));
 }
 
-// The handoff's branches on GitHub, from one request. Null when it can't be reached.
-// While the cloud works on a reply, its pulse branch is a commit ahead of the chat.
-function cloudBranches(info, record) {
-  const heads = listHeads(info);
+// The handoff's branches on GitHub, from one request, which the startup check shares
+// between all waiting handoffs. Null when it can't be reached. While the cloud works
+// on a reply, its pulse branch is a commit ahead of the chat.
+function cloudBranches(info, record, heads = listHeads(info)) {
   if (!heads) return null;
   const { chatRef, codeRef, runBranch } = record.sync;
   const pulse = heads.get(pulseRef(chatRef)) ?? null;
@@ -157,6 +159,110 @@ function typedTurns(bytes) {
 
 export function localTurnsAfter(file, from) {
   return typedTurns(fs.readFileSync(file).subarray(from));
+}
+
+function readRange(file, from, to) {
+  const buffer = Buffer.alloc(Math.max(0, to - from));
+  const fd = fs.openSync(file, 'r');
+  try {
+    let done = 0;
+    while (done < buffer.length) {
+      const got = fs.readSync(fd, buffer, done, buffer.length - done, from + done);
+      if (got === 0) break;
+      done += got;
+    }
+    return buffer.subarray(0, done);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function* linesBackwards(bytes) {
+  let end = bytes.length;
+  while (end > 0) {
+    const start = end >= 2 ? bytes.lastIndexOf(10, end - 2) + 1 : 0;
+    yield bytes.subarray(start, end);
+    end = start;
+  }
+}
+
+// Claude Code carries on a session from the last conversation line in its file, even
+// when an earlier line has a later time (seen on 2.1.319). Conversation lines have a
+// uuid and name the line before as parentUuid, and bookkeeping lines have no uuid.
+// The format is internal, so an unreadable line is skipped.
+function conversationLine(line) {
+  try {
+    const record = JSON.parse(line.toString('utf8'));
+    return typeof record?.uuid === 'string' && !record.isSidechain ? { uuid: record.uuid, parent: record.parentUuid ?? null } : null;
+  } catch {
+    return null;
+  }
+}
+
+function lastUuid(bytes) {
+  for (const line of linesBackwards(bytes)) {
+    const found = conversationLine(line);
+    if (found) return found.uuid;
+  }
+  return null;
+}
+
+// Whether a window opening the session now would show its cloud part: the last
+// conversation line is the cloud's last one, or follows on from it. Handoffs pulled
+// before Skyhop kept track of this say yes, as before.
+export function cloudShown(file, record) {
+  const first = record.blocks?.[0]?.[0];
+  if (!record.cloudLeaf || first === undefined) return true;
+  const size = fs.statSync(file).size;
+  if (first > size) return true;
+  let want = null;
+  for (const line of linesBackwards(readRange(file, first, size))) {
+    if (want !== null && !line.includes(want)) continue;
+    const found = conversationLine(line);
+    if (!found || (want !== null && found.uuid !== want)) continue;
+    if (found.uuid === record.cloudLeaf) return true;
+    if (!found.parent) return false;
+    want = found.parent;
+  }
+  return false;
+}
+
+// Moves the lines written after the cloud part in front of it, so Claude Code carries
+// on from the cloud part again. Only the end of the file that Skyhop added to changes,
+// and lines only change places, so its size stays the same. Returns the record's new
+// fields, or null when it can't be done safely: a message typed there means the user
+// carried on without the cloud part, and /skyhop-back then splits it off.
+export function putCloudLast(file, record, { dryRun = false } = {}) {
+  const blocks = record.blocks ?? [];
+  if (blocks.length === 0) return null;
+  const first = blocks[0][0];
+  const size = fs.statSync(file).size;
+  if (!blocks.every(([from, to], i) => from < to && to <= size && (i === 0 || from >= blocks[i - 1][1]))) return null;
+  const region = readRange(file, first, size);
+  const cloud = [];
+  const moved = [];
+  let at = 0;
+  for (const [from, to] of blocks) {
+    moved.push(region.subarray(at, from - first));
+    cloud.push(region.subarray(from - first, to - first));
+    at = to - first;
+  }
+  moved.push(region.subarray(at));
+  if (moved.some(part => part.length > 0 && part.at(-1) !== 10)) return null;
+  const front = Buffer.concat(moved);
+  if (front.length === 0 || typedTurns(front) > 0) return null;
+  if (!dryRun) {
+    const reordered = Buffer.concat([front, ...cloud]);
+    const fd = fs.openSync(file, 'r+');
+    try {
+      let done = 0;
+      while (done < reordered.length) done += fs.writeSync(fd, reordered, done, reordered.length - done, first + done);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+  return { blocks: [[first + front.length, size]], localTo: size };
 }
 
 // The claude.ai entry for the session's Remote Control, which keeps the whole
@@ -359,10 +465,14 @@ export function pullAll({ cwd, home = os.homedir() }) {
   } catch {
     return [];
   }
-  return waitingRecords(info.root, home).filter(record => record.sync).map(record => {
+  const records = waitingRecords(info.root, home).filter(record => record.sync);
+  if (records.length === 0) return [];
+  // The user can pick a session while this runs, so it asks GitHub only once.
+  const heads = listHeads(info);
+  return records.map(record => {
     let line;
     try {
-      line = pullOne(info, record, home);
+      line = pullOne(info, record, heads, home);
     } catch (error) {
       line = `Skyhop could not update ${label(record)} from the cloud: ${error.message}`;
     } finally {
@@ -373,15 +483,18 @@ export function pullAll({ cwd, home = os.homedir() }) {
   });
 }
 
-function pullOne(info, record, home) {
+function pullOne(info, record, heads, home) {
   const name = label(record);
-  const branches = cloudBranches(info, record);
+  const branches = cloudBranches(info, record, heads);
   if (!branches) return `Skyhop: ${name} is in the cloud, but ${info.remote} couldn't be reached to update it here.`;
   const working = branches.busy ? " It's working on a reply there." : '';
   const waiting = `Skyhop: ${name} is in the cloud.${working} Pick it in /resume to bring it home.`;
-  if (!branches.chat || branches.chat === record.pulledChat) return waiting;
+  if (!branches.chat || branches.chat === record.pulledChat) return showCloudPart(record, name, home) ?? waiting;
 
   const file = findTranscript(record.sessionId).path;
+  // A window that opens the session from here on has loaded it without the cloud
+  // part, and it writes to the file as it opens it, so a change in size means wait.
+  const size = fs.statSync(file).size;
   if (isSessionRunning(record.sessionId)) {
     return `Skyhop: ${name} has new messages in the cloud, but it's open in another Claude Code window. Quit that window, then open claude here again.`;
   }
@@ -389,14 +502,53 @@ function pullOne(info, record, home) {
     return `Skyhop: ${name} has new messages in the cloud, and you also typed in it here after the handoff. Run /skyhop-back to get the cloud part as a separate session.`;
   }
   const got = download(info, record, branches, home);
-  if (got.fresh.length === 0) return waiting;
+  if (got.fresh.length === 0) return showCloudPart(record, name, home) ?? waiting;
 
   const backup = record.backup ?? backupSession(file, record.sessionId, home);
+  if (fs.statSync(file).size !== size) {
+    return `Skyhop: ${name} has new messages in the cloud, but a window opened it while they were downloading. Quit that window, then open claude here again.`;
+  }
   fs.appendFileSync(file, got.fresh);
   saveHandoffRecord({
-    ...record, backup, pulledTo: got.to, pulledChat: got.chatSha, localTo: fs.statSync(file).size, lastPullAt: Date.now(),
+    ...record,
+    backup,
+    pulledTo: got.to,
+    pulledChat: got.chatSha,
+    localTo: size + got.fresh.length,
+    lastPullAt: Date.now(),
+    blocks: [...(record.blocks ?? []), [size, size + got.fresh.length]],
+    cloudLeaf: lastUuid(got.fresh) ?? record.cloudLeaf,
   }, home);
   return `Skyhop: ${name} now has its cloud conversation here (${typedTurns(got.fresh)} new message(s)).${working} Pick it in /resume. It comes home for good when you send a message there, and the cloud chat closes then.`;
+}
+
+// A window that opened the session before its cloud part arrived, and wrote to it
+// after, hides that part. The next start puts it back in view before the user can
+// pick the session. Returns a line to show instead of the usual one, or null.
+function showCloudPart(record, name, home) {
+  if (!record.cloudLeaf) return null;
+  const file = findTranscript(record.sessionId).path;
+  if (cloudShown(file, record)) return null;
+  if (isSessionRunning(record.sessionId)) {
+    return `Skyhop: ${name} is open in another Claude Code window that doesn't show its cloud conversation. Quit that window, then open claude here again.`;
+  }
+  const fixed = putCloudLast(file, record);
+  if (!fixed) {
+    return `Skyhop: ${name} has a cloud conversation that isn't shown, because you typed in it here without it. Run /skyhop-back to get the cloud part as a separate session.`;
+  }
+  saveHandoffRecord({ ...record, ...fixed }, home);
+  log('home', 'cloud part put last', { session: shortId(record.sessionId), moved: fixed.blocks[0][0] - record.blocks[0][0] }, home);
+  return null;
+}
+
+const REOPEN = 'Quit (type /exit), open claude in this folder again, and pick it in /resume.';
+
+function shownHere(sessionId, record) {
+  try {
+    return cloudShown(findTranscript(sessionId).path, record);
+  } catch {
+    return true;
+  }
 }
 
 // When a window opens a session. Returns a line to show the user, or null.
@@ -411,9 +563,9 @@ export function onResume({ sessionId, pid, home = os.homedir() }) {
     return null;
   }
   const branches = cloudBranches(info, record);
-  const line = branches?.chat && branches.chat !== record.pulledChat
-    ? 'Skyhop: this session has new messages in the cloud that are not shown here. Quit (type /exit), open claude in this folder, and pick it in /resume.'
-    : 'Skyhop: this session was in the cloud. It comes home when you send a message, and the cloud chat closes then.';
+  let line = 'Skyhop: this session was in the cloud. It comes home when you send a message, and the cloud chat closes then.';
+  if (branches?.chat && branches.chat !== record.pulledChat) line = `Skyhop: this session has new messages in the cloud that are not shown here. ${REOPEN}`;
+  else if (!shownHere(sessionId, record)) line = `Skyhop: this window doesn't show the session's cloud conversation. ${REOPEN}`;
   log('home', 'opened', { session: shortId(sessionId), github: branches ? 'reached' : 'unreachable', said: line }, home);
   return line;
 }
@@ -471,8 +623,13 @@ function claimHere(info, record, pid, home) {
   if (hasNew && typed === 0) {
     return block('This session has new messages from the cloud that are not loaded in this window. Quit (type /exit), open claude in this folder again, and pick it in /resume.');
   }
-  if (!hasNew && typed === 0 && record.lastPullAt && loadedAt(sessionId, pid, home) < record.lastPullAt) {
-    return block('This window opened the session before its cloud conversation arrived, so that part is not shown here. Quit (type /exit) and pick it in /resume again.');
+  // Coming home from a window without the cloud part would leave it hidden for good.
+  // Stopping the message writes a note after the cloud part, and the next start moves
+  // that note in front of it.
+  const openedTooEarly = !hasNew && typed === 0 && record.lastPullAt && loadedAt(sessionId, pid, home) < record.lastPullAt;
+  const hidden = !(hasNew && typed > 0) && !cloudShown(file, record);
+  if (openedTooEarly || hidden) {
+    return block(`This window doesn't show the session's cloud conversation, so Skyhop stopped this message. ${REOPEN}`);
   }
 
   const got = download(info, record, branches, home);
@@ -559,7 +716,11 @@ function bringBackRecord(info, record, dryRun, home) {
   const file = findTranscript(record.sessionId).path;
   const got = download(info, record, branches, home);
   const typed = localTurnsAfter(file, localEnd(record));
-  const fork = got.fresh.length > 0 && typed > 0;
+  // A cloud part added earlier may be hidden behind lines a window wrote after it.
+  // It's put back in view, unless the user typed there without it: then it's split off.
+  const hidden = !cloudShown(file, record);
+  const split = hidden && !putCloudLast(file, record, { dryRun: true });
+  const fork = (got.fresh.length > 0 && typed > 0) || split;
   console.log(`Saved in the cloud: ${got.count} message turn(s), ${got.lines} transcript record(s).`);
 
   if (dryRun) {
@@ -575,8 +736,12 @@ function bringBackRecord(info, record, dryRun, home) {
   if (!closeCloud(info, record, branches)) throw new SkyhopError(`Could not reach ${info.remote}, so nothing was changed.`, 'Check your connection, then run /skyhop-back again.');
   const backup = record.backup ?? backupSession(file, record.sessionId, home);
   let resumeId = record.sessionId;
-  if (fork) resumeId = forkSession(file, record.sessionId, localEnd(record), got.fresh).newId;
-  else if (got.fresh.length > 0) fs.appendFileSync(file, got.fresh);
+  if (split) resumeId = forkSession(file, record.sessionId, record.blocks[0][0], got.all).newId;
+  else if (fork) resumeId = forkSession(file, record.sessionId, localEnd(record), got.fresh).newId;
+  else {
+    if (hidden) putCloudLast(file, record);
+    if (got.fresh.length > 0) fs.appendFileSync(file, got.fresh);
+  }
   markHome(record, home, { resumeId, backup });
   const code = bringCode(info, record, got.codeSha, false);
   tidyRemote(info, record, got);

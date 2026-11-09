@@ -59,7 +59,7 @@ test('a window that had the session open before the cloud part arrived is stoppe
   // This window never reported opening the session, so it has the old copy loaded.
   const out = hook('prompt', prompt);
   assert.equal(out.decision, 'block');
-  assert.match(out.reason, /opened the session before its cloud conversation arrived/);
+  assert.match(out.reason, /This window doesn't show the session's cloud conversation, so Skyhop stopped this message/);
   assert.equal(record().broughtBackAt, undefined);
 
   hook('start', resume);
@@ -89,6 +89,91 @@ test('cloud messages that are not loaded here stop the first message', t => {
   hook('start', resume);
   assert.match(hook('prompt', prompt).systemMessage, /back from the cloud/);
   assert.equal(fs.readFileSync(localSession, 'utf8'), LOCAL + CLOUD + CLOUD2);
+});
+
+// Lines shaped like Claude Code's: each conversation line names the one before, and
+// Claude Code carries on from the last conversation line in the file.
+const line = fields => `${JSON.stringify({ sessionId: SESSION, ...fields })}\n`;
+const LINKED_LOCAL = line({ type: 'user', uuid: 'local-1', parentUuid: null, message: { content: 'before the handoff' } });
+const LINKED_CLOUD = line({ type: 'user', uuid: 'cloud-1', parentUuid: 'local-1', message: { content: 'from my phone' } })
+  + line({ type: 'assistant', uuid: 'cloud-2', parentUuid: 'cloud-1', message: { content: [] } });
+// What a window that loaded the session without its cloud part writes, such as
+// Skyhop's own note when it stops a message there.
+const STALE_NOTE = line({ type: 'system', subtype: 'informational', uuid: 'stale-1', parentUuid: 'local-1', content: 'stopped' });
+const BOOKKEEPING = line({ type: 'last-prompt', lastPrompt: 'x' });
+
+function linkedSetup(t) {
+  const context = setup(t);
+  fs.writeFileSync(context.localSession, LINKED_LOCAL);
+  context.cloudWork(context.handOff(), { chat: LINKED_CLOUD });
+  context.hook('start', start);
+  assert.equal(fs.readFileSync(context.localSession, 'utf8'), LINKED_LOCAL + LINKED_CLOUD);
+  return context;
+}
+
+test('a line written after the cloud part by a window without it stops the message, and the next start puts the cloud part last', t => {
+  const { hook, localSession, record } = linkedSetup(t);
+  fs.appendFileSync(localSession, STALE_NOTE + BOOKKEEPING);
+
+  assert.match(hook('start', resume).systemMessage, /this window doesn't show the session's cloud conversation/);
+  const out = hook('prompt', prompt);
+  assert.equal(out.decision, 'block');
+  assert.match(out.reason, /doesn't show the session's cloud conversation/);
+  assert.equal(record().broughtBackAt, undefined);
+
+  assert.match(hook('start', start).systemMessage, /is in the cloud\. Pick it in \/resume/);
+  assert.equal(fs.readFileSync(localSession, 'utf8'), LINKED_LOCAL + STALE_NOTE + BOOKKEEPING + LINKED_CLOUD);
+  assert.match(hook('start', resume).systemMessage, /comes home when you send a message/);
+  assert.match(hook('prompt', prompt).systemMessage, /back from the cloud/);
+  assert.equal(fs.readFileSync(localSession, 'utf8'), LINKED_LOCAL + STALE_NOTE + BOOKKEEPING + LINKED_CLOUD);
+});
+
+test('lines a window writes on top of the cloud part keep it in view', t => {
+  const { hook, localSession } = linkedSetup(t);
+  assert.match(hook('start', resume).systemMessage, /comes home when you send a message/);
+  fs.appendFileSync(localSession, line({ type: 'attachment', uuid: 'open-1', parentUuid: 'cloud-2' }) + BOOKKEEPING);
+  assert.match(hook('prompt', prompt).systemMessage, /back from the cloud/);
+});
+
+test('a window that opens the session while the cloud part downloads leaves it for the next start', t => {
+  const { hook, handOff, cloudWork, localSession, record } = setup(t);
+  fs.writeFileSync(localSession, LINKED_LOCAL);
+  cloudWork(handOff(), { chat: LINKED_CLOUD });
+  // The fake `claude agents` writes a line, as a window opening the session would.
+  const out = hook('start', start, { FAKE_CLAUDE_OPENS: localSession, FAKE_CLAUDE_OPENS_LINE: STALE_NOTE.trim() });
+  assert.match(out.systemMessage, /a window opened it while they were downloading/);
+  assert.equal(fs.readFileSync(localSession, 'utf8'), LINKED_LOCAL + STALE_NOTE);
+  assert.equal(record().pulledChat, undefined);
+
+  hook('start', start);
+  assert.equal(fs.readFileSync(localSession, 'utf8'), LINKED_LOCAL + STALE_NOTE + LINKED_CLOUD);
+  hook('start', resume);
+  assert.match(hook('prompt', prompt).systemMessage, /back from the cloud/);
+});
+
+test('a message typed without the cloud part is left for /skyhop-back, which splits the cloud part off', t => {
+  const { hook, skyhop, localSession } = linkedSetup(t);
+  const typed = line({ type: 'user', uuid: 'stale-2', parentUuid: 'local-1', message: { content: 'typed without the cloud part' } });
+  fs.appendFileSync(localSession, typed);
+  assert.match(hook('start', start).systemMessage, /typed in it here without it\. Run \/skyhop-back/);
+  assert.equal(fs.readFileSync(localSession, 'utf8'), LINKED_LOCAL + LINKED_CLOUD + typed);
+
+  const result = skyhop(['--back']);
+  assert.equal(result.status, 0, result.output);
+  const newId = result.output.match(/claude --resume (\S+)/)[1];
+  assert.notEqual(newId, SESSION);
+  const forked = fs.readFileSync(path.join(path.dirname(localSession), `${newId}.jsonl`), 'utf8');
+  assert.equal(forked, (LINKED_LOCAL + LINKED_CLOUD).replaceAll(SESSION, newId));
+  assert.equal(fs.readFileSync(localSession, 'utf8'), LINKED_LOCAL + LINKED_CLOUD + typed);
+});
+
+test('/skyhop-back puts a hidden cloud part back in view', t => {
+  const { skyhop, localSession } = linkedSetup(t);
+  fs.appendFileSync(localSession, STALE_NOTE);
+  const result = skyhop(['--back']);
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /now in your original session/);
+  assert.equal(fs.readFileSync(localSession, 'utf8'), LINKED_LOCAL + STALE_NOTE + LINKED_CLOUD);
 });
 
 // While a reply runs, the pulse branch is a commit ahead of the chat branch.

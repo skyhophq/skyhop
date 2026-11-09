@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { localTurnsAfter, remoteControlEntry } from '../scripts/back.mjs';
+import { cloudShown, localTurnsAfter, putCloudLast, remoteControlEntry } from '../scripts/back.mjs';
 import { dirty, run, tempDir, write } from './helpers.mjs';
 import { CLOUD, LOCAL, SESSION, setup } from './roundtrip.mjs';
 
@@ -325,3 +325,45 @@ test('messages typed long after the last bridge record are counted as possibly m
   assert.deepEqual(remoteControlEntry(file), { url: 'https://claude.ai/code/session_01SomeEntryAbcd', missing: 12 });
 });
 
+
+const linked = (uuid, parentUuid, type = 'system') => `${JSON.stringify({ type, uuid, parentUuid })}\n`;
+
+test('two cloud parts with stray lines between and after them end up last, in order, with nothing lost', t => {
+  const file = path.join(tempDir(t), 'session.jsonl');
+  const local = linked('l1', null, 'user');
+  const cloud1 = linked('c1', 'l1', 'user') + linked('c2', 'c1', 'assistant');
+  const stray1 = linked('s1', 'l1') + bridgeLine('cse_x');
+  const cloud2 = linked('c3', 'c2', 'user') + linked('c4', 'c3', 'assistant');
+  const stray2 = linked('s2', 's1');
+  const text = local + cloud1 + stray1 + cloud2 + stray2;
+  fs.writeFileSync(file, text);
+  const at = part => text.indexOf(part);
+  const record = { cloudLeaf: 'c4', blocks: [[at(cloud1), at(cloud1) + cloud1.length], [at(cloud2), at(cloud2) + cloud2.length]] };
+
+  assert.equal(cloudShown(file, record), false);
+  assert.ok(putCloudLast(file, record, { dryRun: true }));
+  assert.equal(fs.readFileSync(file, 'utf8'), text);
+
+  const fixed = putCloudLast(file, record);
+  assert.equal(fs.readFileSync(file, 'utf8'), local + stray1 + stray2 + cloud1 + cloud2);
+  assert.deepEqual(fixed, { blocks: [[local.length + stray1.length + stray2.length, text.length]], localTo: text.length });
+  assert.equal(cloudShown(file, { ...record, ...fixed }), true);
+
+  // A window that loads it now writes on top of the cloud part, which keeps it shown.
+  fs.appendFileSync(file, linked('w1', 'c4') + bridgeLine('cse_y'));
+  assert.equal(cloudShown(file, { ...record, ...fixed }), true);
+});
+
+test('a typed message or a cut-off line after the cloud part is never moved', t => {
+  const file = path.join(tempDir(t), 'session.jsonl');
+  const local = linked('l1', null, 'user');
+  const cloud = linked('c1', 'l1', 'user');
+  const record = { cloudLeaf: 'c1', blocks: [[local.length, local.length + cloud.length]] };
+  for (const after of [typedLine('typed without the cloud part'), '{"type":"system","uuid":"s1"']) {
+    fs.writeFileSync(file, local + cloud + after);
+    assert.equal(putCloudLast(file, record), null);
+    assert.equal(fs.readFileSync(file, 'utf8'), local + cloud + after);
+  }
+  // Handoffs pulled before Skyhop tracked the cloud part count as shown, as before.
+  assert.equal(cloudShown(file, {}), true);
+});
