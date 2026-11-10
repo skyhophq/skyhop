@@ -35,6 +35,8 @@ if [ "$1" = "-p" ] && [ "$2" = "--cloud" ]; then
     exit 1
   fi
   cat > "$FAKE_CLAUDE_DIR/prompt"
+  # Every message sent to the chat, in order, for tests that follow a whole exchange.
+  { cat "$FAKE_CLAUDE_DIR/prompt"; printf '\n=====\n'; } >> "$FAKE_CLAUDE_DIR/sent-log"
   printf '%s' "$3" > "$FAKE_CLAUDE_DIR/sent-to"
   echo "{\"ok\":true,\"session_id\":\"$3\",\"url\":\"https://claude.ai/code/$3\"}"
   exit 0
@@ -46,7 +48,13 @@ if [ "$1" = "--cloud" ]; then
     exit 1
   fi
   printf '%s' "$2" > "$FAKE_CLAUDE_DIR/prompt"
+  printf '%s' "$2" > "$FAKE_CLAUDE_DIR/launch-prompt"
   git rev-parse --abbrev-ref HEAD > "$FAKE_CLAUDE_DIR/branch"
+  # Stands in for the chat's relay saying it is ready to show the earlier conversation.
+  if [ -n "$FAKE_CLAUDE_READY" ]; then
+    tail=$(git rev-parse --abbrev-ref HEAD | sed 's#^skyhop-run/##')
+    git push -q origin "HEAD:refs/heads/skyhop-sync/$tail-pulse" 2>/dev/null
+  fi
   printf '%s' "${CCR_FORCE_BUNDLE:-unset}" > "$FAKE_CLAUDE_DIR/force-bundle"
   git show HEAD:tracked.txt > "$FAKE_CLAUDE_DIR/launch-tracked" 2>/dev/null
   git show HEAD:.skyhop/mode > "$FAKE_CLAUDE_DIR/relay-mode" 2>/dev/null

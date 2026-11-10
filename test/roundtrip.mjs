@@ -27,7 +27,7 @@ export function setup(t, options) {
   const vm = path.join(repo.base, 'vm');
   const env = (extra = {}) => ({
     ...process.env, HOME: home, PATH: `${FIXTURES}:${process.env.PATH}`, FAKE_CLAUDE_DIR: repo.base,
-    FAKE_CLAUDE_MODE: '', SKYHOP_LAUNCH_WAIT_MS: '5000', SKYHOP_LAUNCH_SETTLE_MS: '100',
+    FAKE_CLAUDE_MODE: '', SKYHOP_LAUNCH_WAIT_MS: '5000', SKYHOP_LAUNCH_SETTLE_MS: '100', SKYHOP_HISTORY: 'off',
     CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_PID: '4242', CLAUDE_CODE_REMOTE: '', SKYHOP_INNER: '',
     SKYHOP_LOAD_MARGIN_MS: '0', SKYHOP_REOPEN_WAIT_MS: '0', FAKE_CLAUDE_SEND: '', ...extra,
   });

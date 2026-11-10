@@ -33,6 +33,7 @@ function setup(t, options) {
         FAKE_CLAUDE_DIR: repo.base,
         FAKE_CLAUDE_MODE: mode,
         SKYHOP_LAUNCH_WAIT_MS: '5000',
+        SKYHOP_HISTORY: 'off',
         SKYHOP_LAUNCH_SETTLE_MS: '100',
       },
     });

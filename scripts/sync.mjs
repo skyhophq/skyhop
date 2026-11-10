@@ -53,6 +53,18 @@ export function openMemory(data, key) {
 // Which code the cloud saved, sealed with the conversation. Anyone who can push to
 // the repository could change the code branch, so the Mac checks it against this
 // before the code goes into the user's files.
+// The exchanges the cloud chat replays as real messages, from the handoff commit.
+export const HISTORY_NAME = 'history.enc';
+const HISTORY_SEQ = 'history';
+
+export function sealHistory(history, key) {
+  return sealChunk({ from: 0, to: 0, bytes: Buffer.from(JSON.stringify(history)) }, key, HISTORY_SEQ);
+}
+
+export function openHistory(data, key) {
+  return JSON.parse(openChunk(data, key, HISTORY_SEQ).bytes.toString('utf8'));
+}
+
 const CODE_NAME = 'code.enc';
 const CODE_SEQ = 'code';
 

@@ -86,7 +86,7 @@ function cut(text, limit) {
 
 // Exchanges before the handoff, oldest first: what the user typed, and Claude's
 // words in reply. Tool calls and thinking are left out.
-export function recentExchanges(file, { limit = MAX_EXCHANGES } = {}) {
+export function recentExchanges(file, { limit = MAX_EXCHANGES, since = null } = {}) {
   let branch;
   try {
     branch = currentBranch(readTail(file, TAIL_BYTES));
@@ -97,7 +97,7 @@ export function recentExchanges(file, { limit = MAX_EXCHANGES } = {}) {
   for (const record of branch) {
     const said = typed(record);
     if (said) {
-      exchanges.push({ you: said.text, handoff: said.handoff, claude: [] });
+      exchanges.push({ you: said.text, handoff: said.handoff, claude: [], at: record.timestamp ?? null });
     } else if (record.type === 'assistant' && exchanges.length > 0) {
       const words = texts(record.message?.content).join('\n').trim();
       if (words) exchanges.at(-1).claude.push(words);
@@ -105,7 +105,9 @@ export function recentExchanges(file, { limit = MAX_EXCHANGES } = {}) {
   }
   const handoff = exchanges.findLastIndex(exchange => exchange.handoff);
   const before = handoff >= 0 ? exchanges.slice(0, handoff) : exchanges;
-  return before.slice(-limit).map(({ you, claude }) => ({ you, claude: claude.join('\n\n') }));
+  // `since` keeps only what was typed after that moment, such as the last homecoming.
+  const kept = since ? before.filter(exchange => typeof exchange.at === 'string' && exchange.at > since) : before;
+  return kept.slice(-limit).map(({ you, claude }) => ({ you, claude: claude.join('\n\n') }));
 }
 
 // The section for the recap, and how many messages it quotes. The oldest exchanges
@@ -123,4 +125,22 @@ export function recentConversation(file, { home = os.homedir(), maxBytes = MAX_B
     blocks.shift();
   }
   return { section: '', count: 0 };
+}
+
+export const HISTORY_EXCHANGES = 50;
+const REPLAY_YOUR_LIMIT = 4000;
+const REPLAY_CLAUDE_LIMIT = 12000;
+
+// The exchanges the cloud chat shows as real messages: each `you` is posted into the
+// chat, and answered there with `claude`. A message that starts with a slash would
+// run as a command in the chat, and Skyhop's own markers would steer the relay, so
+// both are defused. Home folders and likely secrets are hidden, as in the recap.
+export function replayHistory(file, { limit = HISTORY_EXCHANGES, since = null, home = os.homedir() } = {}) {
+  const clean = text => redactSecrets(redactPaths(text, home));
+  return recentExchanges(file, { limit, since })
+    .map(({ you, claude }) => ({
+      you: clean(cut(you.startsWith('/') ? `(command) ${you}` : you, REPLAY_YOUR_LIMIT)).replaceAll('[skyhop-', '[skyhop -'),
+      claude: clean(cut(claude, REPLAY_CLAUDE_LIMIT)),
+    }))
+    .filter(exchange => exchange.you.trim());
 }

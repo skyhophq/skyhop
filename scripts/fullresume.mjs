@@ -10,7 +10,7 @@ import { git, SkyhopError, tryGit } from './git.mjs';
 import { skyhopVersion } from './log.mjs';
 import { RELAY_COMMIT_MARKER, WAIT_COMMAND } from './relay.mjs';
 import { packMemory } from './memory.mjs';
-import { sealMemory, sealTranscript } from './sync.mjs';
+import { HISTORY_NAME, sealHistory, sealMemory, sealTranscript } from './sync.mjs';
 
 // A direct upload is capped at 100 MB after compression, shared with the repository.
 export const MAX_UPLOAD_BYTES = 95 * 1024 * 1024;
@@ -28,7 +28,7 @@ const RELAY_COMMAND = 'node "$CLAUDE_PROJECT_DIR/.skyhop/relay.mjs"';
 const WAIT_RULE = `Bash(${WAIT_COMMAND})`;
 const SCRIPTS = path.dirname(fileURLToPath(import.meta.url));
 // Everything the relay needs in the VM, where the plugin isn't installed.
-export const VM_SCRIPTS = ['log.mjs', 'memory.mjs', 'relay.mjs', 'secrets.mjs', 'sync.mjs'];
+export const VM_SCRIPTS = ['log.mjs', 'memory.mjs', 'relay.mjs', 'replay.mjs', 'secrets.mjs', 'sync.mjs'];
 
 function projectsDir() {
   return path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'projects');
@@ -89,7 +89,8 @@ export function mergeSettings(existing) {
 // Returns the size of the transcript copy, which is where /skyhop-back picks up.
 // The live session keeps writing to the original, so this can't be read beforehand.
 // `memory` is the project's notes, or null when auto memory is off on this Mac.
-export function addRelayCommit(dir, { transcript, sessionId, mode, brief, sync, key, memory = null }) {
+// `history` is what the chat replays as real messages, or null. It needs sync, for the key.
+export function addRelayCommit(dir, { transcript, sessionId, mode, brief, sync, key, memory = null, history = null }) {
   const skyhop = path.join(dir, '.skyhop');
   fs.mkdirSync(skyhop, { recursive: true });
   const bytes = fs.readFileSync(transcript.path);
@@ -102,6 +103,10 @@ export function addRelayCommit(dir, { transcript, sessionId, mode, brief, sync, 
   }
   if (memory && sync) fs.writeFileSync(path.join(skyhop, 'memory.enc'), sealMemory(packMemory(memory), key));
   else if (memory) fs.writeFileSync(path.join(skyhop, 'memory.json'), packMemory(memory));
+  if (history && sync) {
+    fs.writeFileSync(path.join(skyhop, HISTORY_NAME), sealHistory(history, key));
+    fs.cpSync(path.join(SCRIPTS, 'chat-plugin'), path.join(skyhop, 'chat-plugin'), { recursive: true });
+  }
   for (const script of VM_SCRIPTS) fs.copyFileSync(path.join(SCRIPTS, script), path.join(skyhop, script));
   fs.writeFileSync(path.join(skyhop, 'session-id'), `${sessionId}\n`);
   fs.writeFileSync(path.join(skyhop, 'version'), `${skyhopVersion()}\n`);

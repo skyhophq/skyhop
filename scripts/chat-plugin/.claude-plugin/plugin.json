@@ -1,0 +1,5 @@
+{
+  "name": "skyhop-chat",
+  "version": "0.10.0",
+  "description": "Runs inside a Skyhop cloud chat: shows the replies Skyhop's relay hands it, word for word, without a model call."
+}
