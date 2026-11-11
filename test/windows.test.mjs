@@ -139,14 +139,22 @@ test('a handoff whose chat never started is forgotten, and a retry clears it and
   assert.ok(readRecord(SESSION, home).cloud, 'the retry started its chat');
 });
 
-test('a hidden launch whose program quits stops waiting at once and says which program it was', async t => {
+test('a hidden launch whose program quits keeps waiting for the chat, as on Windows, where claude quits within seconds', async t => {
   const repo = makeRepo(t);
-  const started = Date.now();
+  const info = repoInfo(repo.root);
   const outcome = await launchHidden({
-    dir: repo.root, prompt: 'x', info: repoInfo(repo.root), pulse: 'p', waitMs: 60_000,
-    start: () => ({ pid: 77, program: 'C:\\Windows\\notepad.exe' }), stop: () => {}, alive: () => false,
+    dir: repo.root, prompt: 'x', info, pulse: 'q-pulse', waitMs: 5000,
+    start: () => {
+      setTimeout(() => pushPulse(repo, 'q-pulse', pulseMessage(PULSE_SETUP, 'session_01AfterQuit')), 300);
+      return { pid: 77, program: 'C:\\npm\\claude.cmd' };
+    },
+    stop: () => {}, alive: () => false,
   });
-  assert.equal(outcome.status, 'unconfirmed');
-  assert.match(outcome.detail, /notepad\.exe stopped after \d+ seconds, before the cloud chat reported back/);
-  assert.ok(Date.now() - started < 5000, 'it did not wait out the minute');
+  assert.equal(outcome.status, 'started');
+  assert.equal(outcome.sessionId, 'session_01AfterQuit');
+  assert.equal(outcome.quitAfter, 0);
+
+  const none = await launchHidden({ dir: repo.root, prompt: 'x', info, pulse: 'never-pulse', waitMs: 100, start: () => ({ pid: 78, program: 'claude.exe' }), stop: () => {}, alive: () => false });
+  assert.equal(none.status, 'unconfirmed');
+  assert.match(none.detail, /did not report back within 0 minutes\. claude\.exe quit after 0 seconds/);
 });

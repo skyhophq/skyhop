@@ -25,7 +25,7 @@ Follow these steps in order.
 
    If the plan's History line says Remote Control is off, say so in the same question. The cloud chat then shows only the last exchanges the plan names, and there will be no link to the whole conversation. To get the link, the user can type `/remote-control` now and then tell you to go ahead. Step 4 picks up the link by itself. Only the user can turn Remote Control on, so don't try to do it yourself.
 
-4. **Hand off.** Run the same command without `--dry-run` and with `--yes`, and allow up to 15 minutes. A large upload takes time, and after the chat starts Skyhop posts the session's earlier messages into it one by one, which the plan's History line estimates:
+4. **Hand off.** Run the same command without `--dry-run` and with `--yes`, and allow 10 minutes, the most a shell command gets. Skyhop keeps itself within that. A large upload takes time, and after the chat starts Skyhop posts the session's earlier messages into it one by one, which the plan's History line estimates:
 
    ```bash
    node "${CLAUDE_PLUGIN_ROOT}/scripts/skyhop.mjs" --brief ~/.skyhop/briefs/${CLAUDE_SESSION_ID}.md --session ${CLAUDE_SESSION_ID} --yes $ARGUMENTS

@@ -73,3 +73,11 @@ test('a resumed session plays the plane home only when Skyhop left the note', as
   expect(await ui.find({ key: 'sky' })).toBeDefined()
   await ui.unmount()
 })
+
+test('a handoff run through the PowerShell tool on Windows plays the plane too', async ($, on) => {
+  on('tool.call', () => ({ result: {}, text: STARTED }))
+  await $.tool.call({ tool: 'PowerShell', command: 'node "C:/Users/me/.claude/plugins/cache/skyhop/skyhop/0.11.2/scripts/skyhop.mjs" --brief b.md --session s --yes' } as never)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'sky' })).toBeDefined()
+  await ui.unmount()
+})

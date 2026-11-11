@@ -293,9 +293,13 @@ const SESSION_ID = /^[\w-]+$/
 
 export const register: Register = on => {
   // A handoff that went through: the plane takes the session up.
-  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+  on('tool.call', async ($, e, next) => {
+    // Bash, or the PowerShell tool Claude Code may use on Windows.
+    const tool: string = e.tool
+    if (tool !== 'Bash' && tool !== 'PowerShell') return next(e)
     const ran = await next(e)
-    const isHandoff = /skyhop\.mjs/.test(e.command) && /--yes/.test(e.command) && !/--dry-run/.test(e.command)
+    const command = String((e as { command?: unknown }).command ?? '')
+    const isHandoff = /skyhop\.mjs/.test(command) && /--yes/.test(command) && !/--dry-run/.test(command)
     if (!isHandoff || ran.deny !== undefined || ran.isError === true || !HANDED_OFF.test(ran.text ?? '')) return ran
 
     const run = begin('away', IN_THE_CLOUD)

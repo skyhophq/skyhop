@@ -270,22 +270,23 @@ export async function launchHidden({
   const { pid, program, error } = start(dir, prompt);
   if (!pid) return { status: 'unconfirmed', notStarted: true, detail: error };
   const began = Date.now();
-  let quit = false;
-  const giveUp = () => {
-    quit = !alive(pid);
-    return quit;
+  // On Windows, claude --cloud creates the chat and quits within seconds, before the
+  // chat has started up and reported back. So a quit is noted, never taken as failure.
+  let quitAfter = null;
+  const noteQuit = () => {
+    if (quitAfter === null && !alive(pid)) quitAfter = Math.round((Date.now() - began) / 1000);
+    return false;
   };
   try {
-    const report = await waitForPulse(info, pulse, waitMs, found => Boolean(found.chatId), { giveUp });
+    const report = await waitForPulse(info, pulse, waitMs, found => Boolean(found.chatId), { giveUp: noteQuit });
     const seconds = Math.round((Date.now() - began) / 1000);
-    if (report) return { status: 'started', sessionId: report.chatId, url: `https://claude.ai/code/${report.chatId}`, program, seconds };
+    if (report) return { status: 'started', sessionId: report.chatId, url: `https://claude.ai/code/${report.chatId}`, program, seconds, quitAfter };
     return {
       status: 'unconfirmed',
       program,
       seconds,
-      detail: quit
-        ? `${program} stopped after ${seconds} seconds, before the cloud chat reported back.`
-        : `The cloud chat did not report back within ${Math.round(waitMs / 60_000)} minutes. ${program} was still running.`,
+      quitAfter,
+      detail: `The cloud chat did not report back within ${Math.round(waitMs / 60_000)} minutes. ${program} ${quitAfter === null ? 'was still running' : `quit after ${quitAfter} seconds`}.`,
     };
   } finally {
     // The chat runs in the cloud now, so the local window is no longer needed.

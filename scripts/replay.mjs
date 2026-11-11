@@ -190,10 +190,11 @@ export function replayStep({ root, prompt, ready, restart = restartChat, loaded 
   }
 
   // Replaying: each old message arrives in order and gets its old reply.
-  const next = history.exchanges[state.cursor];
-  if (next && sameText(prompt, next.you)) {
-    setAnswer(next.claude.trim() || NO_WORDS);
-    save({ state: 'replaying', cursor: state.cursor + 1 });
+  // In order, though the Mac may leave out the oldest ones when it is short of time.
+  const at = history.exchanges.findIndex((exchange, index) => index >= state.cursor && sameText(prompt, exchange.you));
+  if (at >= 0) {
+    setAnswer(history.exchanges[at].claude.trim() || NO_WORDS);
+    save({ state: 'replaying', cursor: at + 1 });
     return { output: null };
   }
   if (waitingMessage) {

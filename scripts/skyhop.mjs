@@ -41,6 +41,14 @@ const historyWaitMs = () => Number(process.env.SKYHOP_HISTORY_WAIT_MS ?? 180_000
 const historyPingMs = () => Number(process.env.SKYHOP_HISTORY_PING_MS ?? 150_000);
 const historySpacingMs = () => Number(process.env.SKYHOP_HISTORY_SPACING_MS ?? 3000);
 const HISTORY_PROGRESS_EVERY = 10;
+// Claude runs /skyhop as a shell command, which stops after 10 minutes at most. The
+// replay fits in what is left, leaving out the oldest exchanges when it must, so the
+// message that starts the work always gets sent.
+const STARTED_AT = Date.now();
+const timeBudgetMs = () => Number(process.env.SKYHOP_TIME_BUDGET_MS ?? 9 * 60_000);
+const FINAL_MESSAGE_MS = 30_000;
+const SEND_ESTIMATE_MS = 2500;
+const timeLeft = () => STARTED_AT + timeBudgetMs() - Date.now();
 
 function readOptions(args) {
   let parsed;
@@ -200,7 +208,7 @@ const COMING_HOME = 'Quit this window now (type /exit). When you are back, open 
 function reportLaunch({ outcome, command, record, synced }) {
   log('handoff', 'launch', {
     result: outcome.status, reason: outcome.reason, chat: outcome.sessionId,
-    program: outcome.program, seconds: outcome.seconds, detail: outcome.status === 'started' ? null : outcome.detail,
+    program: outcome.program, seconds: outcome.seconds, 'program-quit-after': outcome.quitAfter, detail: outcome.status === 'started' ? null : outcome.detail,
   });
   if (outcome.status === 'started') {
     recordHandoff({ ...record, status: 'started', sessionId: outcome.sessionId, url: outcome.url });
@@ -296,8 +304,19 @@ async function showHistory({ info, sessionId, history, pulse, finalMessage, fall
     console.log(sent.ok ? 'The cloud chat is set up.' : `The message that starts the work could not be sent (${sent.error}). Open the chat and send it a message to carry on.`);
     return;
   }
+  const each = historySpacingMs() + SEND_ESTIMATE_MS;
+  const fits = Math.max(0, Math.floor((timeLeft() - FINAL_MESSAGE_MS) / each));
+  const exchanges = history.exchanges.slice(-Math.max(1, Math.min(total, fits)));
+  if (exchanges.length < total) {
+    console.log(`There is time for the last ${exchanges.length} of ${total} exchange(s) before Claude's 10-minute limit on this command, so the older ones are left out.`);
+    log('handoff', 'history trimmed for time', { kept: exchanges.length, of: total });
+  }
   let shown = 0;
-  for (const exchange of history.exchanges) {
+  for (const exchange of exchanges) {
+    if (timeLeft() < FINAL_MESSAGE_MS) {
+      log('handoff', 'history stopped for time', { shown, of: exchanges.length });
+      break;
+    }
     let sent = sendToChat(sessionId, exchange.you);
     if (!sent.ok) {
       await sleep(historySpacingMs());
@@ -308,14 +327,14 @@ async function showHistory({ info, sessionId, history, pulse, finalMessage, fall
       break;
     }
     shown += 1;
-    if (shown % HISTORY_PROGRESS_EVERY === 0 && shown < total) console.log(`  ${shown} of ${total} shown`);
+    if (shown % HISTORY_PROGRESS_EVERY === 0 && shown < exchanges.length) console.log(`  ${shown} of ${exchanges.length} shown`);
     await sleep(historySpacingMs());
   }
   const sent = sendToChat(sessionId, finalMessage);
   log('handoff', 'history shown', { shown, of: total, last: sent.ok ? 'sent' : sent.error });
-  console.log(shown === total
-    ? `The cloud chat now shows ${total} exchange(s) of your conversation.`
-    : `The cloud chat shows ${shown} of ${total} exchange(s). The rest could not be sent.`);
+  console.log(shown === exchanges.length
+    ? `The cloud chat now shows ${shown} exchange(s) of your conversation.`
+    : `The cloud chat shows ${shown} of ${exchanges.length} exchange(s). The rest could not be sent in time.`);
   if (!sent.ok) console.log(`The message that starts the work could not be sent (${sent.error}). Open the chat and send it a message to carry on.`);
 }
 

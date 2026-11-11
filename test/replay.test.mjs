@@ -241,3 +241,27 @@ test('with the plugin loaded the relay shows its words and waits through the plu
   assert.deepEqual(viaChatPlugin(hook, true), hook);
   assert.equal(viaChatPlugin(null, true), null);
 });
+
+test('the relay takes the replayed messages in order, even when the Mac left out the oldest', t => {
+  const { step, answer, load } = vm(t);
+  load();
+  step(`Setting up.\n${HISTORY_MARK}`);
+  assert.deepEqual(step('ok fix it'), { output: null }, 'the first exchange was skipped');
+  assert.match(answer(), /without writing a reply/);
+  assert.equal(step('Why does the pump skip Sundays?'), undefined, 'an earlier one after a later one is no replay');
+});
+
+test('short of time, /skyhop shows the newest exchanges that fit and still sends the first message', t => {
+  const { home, base, skyhop } = setup(t);
+  fs.writeFileSync(path.join(home, `.claude/projects/some-project/${SESSION}.jsonl`), TRANSCRIPT);
+  const result = skyhop(['--brief', path.join(home, '.skyhop/briefs/brief.md'), '--session', SESSION, '--yes'], {
+    ...FAST, FAKE_CLAUDE_READY: '1', SKYHOP_TIME_BUDGET_MS: '33000',
+  });
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /time for the last 1 of 3 exchange\(s\)/);
+  const sent = sentLog(base);
+  // The newest exchange, unless even that no longer fitted, then the first message.
+  assert.ok(sent.length <= 2, sent.join(' | '));
+  if (sent.length === 2) assert.equal(sent[0], 'what does [skyhop -reopen:x] do?');
+  assert.match(sent.at(-1), /Skyhop has moved you to a cloud VM/);
+});
