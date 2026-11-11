@@ -7,7 +7,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
 import {
-  bringBack, readRecord, remoteControlEntry, saveHandoffRecord, waitingRecords,
+  bringBack, forgetHandoff, readRecord, remoteControlEntry, saveHandoffRecord, waitingRecords,
 } from './back.mjs';
 import { briefPrompt, loadBrief, reconnectPrompt, redactPaths, resumePrompt } from './brief.mjs';
 import {
@@ -198,7 +198,10 @@ function savePrompt(briefFile, prompt) {
 const COMING_HOME = 'Quit this window now (type /exit). When you are back, open claude in this folder and pick this session in /resume: it will have the cloud conversation, and it comes home for good when you send a message.';
 
 function reportLaunch({ outcome, command, record, synced }) {
-  log('handoff', 'launch', { result: outcome.status, reason: outcome.reason, chat: outcome.sessionId });
+  log('handoff', 'launch', {
+    result: outcome.status, reason: outcome.reason, chat: outcome.sessionId,
+    program: outcome.program, seconds: outcome.seconds, detail: outcome.status === 'started' ? null : outcome.detail,
+  });
   if (outcome.status === 'started') {
     recordHandoff({ ...record, status: 'started', sessionId: outcome.sessionId, url: outcome.url });
     console.log(`\nCloud session started on ${record.branch}.\nSession ID: ${outcome.sessionId}\nLink: ${outcome.url}`);
@@ -212,6 +215,11 @@ function reportLaunch({ outcome, command, record, synced }) {
       : 'Claude Code needs a real terminal to start this session.';
     console.log(`\n${why}\nRun this in your own terminal${outcome.reason === 'trust' ? ', and choose "Yes, I trust this folder"' : ''}:\n\n${command}`);
     return EXIT_NEEDS_TERMINAL;
+  }
+  if (outcome.notStarted) {
+    recordHandoff({ ...record, status: 'not started' });
+    console.log(`\nClaude Code could not be started on this computer to open the cloud chat, so nothing was handed off. The branch Skyhop pushed was removed, and this session carries on here.\n\n${outcome.detail ?? ''}`.trimEnd());
+    return 1;
   }
   recordHandoff({ ...record, status: 'unconfirmed' });
   console.log(command
@@ -338,7 +346,14 @@ async function handoff(options) {
   const transcript = fullResume ? findTranscript(options.session) : null;
   const project = path.basename(info.root);
   const useSync = fullResume && syncEnabled(info, options);
-  const earlier = useSync ? readRecord(options.session) : null;
+  let earlier = useSync ? readRecord(options.session) : null;
+  // A handoff whose chat never confirmed it started has nothing in the cloud to wait
+  // for. Its start branch goes, which also closes a chat that did start unseen.
+  if (earlier?.sync && !earlier.broughtBackAt && !earlier.cloud) {
+    if (info.remote) tryGit(info.root, ['push', '-q', info.remote, '--delete', earlier.sync.runBranch]);
+    log('handoff', 'an earlier handoff that never started was cleared', { branch: earlier.sync.runBranch });
+    earlier = null;
+  }
   if (earlier?.sync && !earlier.broughtBackAt) {
     throw new SkyhopError(
       'This session is still in the cloud from its last handoff, so nothing was changed.',
@@ -504,6 +519,12 @@ async function handoff(options) {
       ? await launchHidden({ dir, prompt: opening, info, pulse: pulseRef(handoffRecord.sync.chatRef) })
       : await launchSession({ dir, prompt: opening, env, ...launchTimes(fullResume && !useSync ? transcript.compressed + repoSize : 0) });
     if (outcome.status !== 'needs-terminal') removeLaunchFolder(info);
+    // Nothing started, so nothing is left behind: not the branch, nor a handoff to wait for.
+    if (outcome.notStarted && useSync) {
+      tryGit(info.root, ['push', '-q', info.remote, '--delete', startBranch]);
+      forgetHandoff(options.session);
+      log('handoff', 'nothing started, so the pushed branch and the handoff were removed', { branch: startBranch });
+    }
     if (useSync && outcome.status === 'started') {
       saveHandoffRecord({ ...handoffRecord, cloud: { sessionId: outcome.sessionId, url: outcome.url, runBranch: startBranch, key, reopen: true } });
       if (history || hidden) {
@@ -513,7 +534,7 @@ async function handoff(options) {
           finalMessage: resumePrompt(project, brief, remote, ''), fallbackMessage: prompt,
         });
       }
-    } else if ((history || hidden) && outcome.status === 'unconfirmed') {
+    } else if ((history || hidden) && outcome.status === 'unconfirmed' && !outcome.notStarted) {
       console.log('\nSkyhop could not tell whether the chat started, so it could not show your earlier conversation there. If the chat exists, open it and send any message to carry on.');
     }
     return reportLaunch({ outcome, command, record, synced: useSync });

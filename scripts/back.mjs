@@ -55,6 +55,11 @@ export function saveHandoffRecord(record, home = os.homedir()) {
   privateFile(recordFile(record.sessionId, home));
 }
 
+// For a handoff whose cloud chat never started: nothing is in the cloud to come home.
+export function forgetHandoff(sessionId, home = os.homedir()) {
+  fs.rmSync(recordFile(sessionId, home), { force: true });
+}
+
 export function readRecord(sessionId, home = os.homedir()) {
   return readJson(recordFile(sessionId, home));
 }

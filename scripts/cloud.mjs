@@ -189,10 +189,11 @@ export function readPulse(info, name) {
 }
 
 // Waits for a pulse commit that `accept` takes. Returns it, or null after waitMs.
-export async function waitForPulse(info, name, waitMs, accept = () => true) {
+export async function waitForPulse(info, name, waitMs, accept = () => true, { giveUp = () => false } = {}) {
   const started = Date.now();
   let seen = null;
   for (;;) {
+    if (giveUp()) return null;
     const head = tryGit(info.root, ['ls-remote', '--heads', info.remote, `refs/heads/${name}`])?.split('\t')[0] || null;
     if (head && head !== seen) {
       seen = head;
@@ -209,8 +210,18 @@ const hiddenWaitMs = () => Number(process.env.SKYHOP_HIDDEN_WAIT_MS ?? 300_000);
 // Windows: starts `claude --cloud` in a hidden console window, which gives it the
 // terminal it needs, and waits for the new chat to report its ID on the pulse branch.
 // The prompt must be one short line, which a Windows command line carries safely.
+// PowerShell resolves `claude` to npm's claude.ps1 first, which Start-Process can't
+// run, so the script picks the program itself: claude.exe from the native installer,
+// or npm's claude.cmd.
+export const HIDDEN_START_SCRIPT = [
+  "$c = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.exe', '.cmd', '.bat' } | Select-Object -First 1",
+  "if (-not $c) { [Console]::Error.Write('Claude Code (claude.exe or claude.cmd) was not found on PATH'); exit 1 }",
+  '$p = Start-Process -FilePath $c.Source -ArgumentList $env:SKYHOP_CLAUDE_ARGS -WorkingDirectory $env:SKYHOP_LAUNCH_DIR -WindowStyle Hidden -PassThru',
+  "[Console]::Out.Write([string]$p.Id + '|' + $c.Source)",
+].join('; ');
+
 // Starts `claude --cloud <prompt>` in a hidden console window, and returns its
-// process ID, or { error }.
+// process ID, or { error } when nothing was started.
 export function startHidden(dir, prompt) {
   // SKYHOP_LAUNCH=hidden on macOS or Linux runs this same path for testing, with
   // `script` standing in for the hidden window.
@@ -219,16 +230,18 @@ export function startHidden(dir, prompt) {
     if (!command) return { error: 'no terminal wrapper on this system' };
     const child = spawn('sh', ['-c', command], { cwd: dir, detached: true, stdio: 'ignore', env: { ...process.env, TERM: 'xterm-256color' } });
     child.unref();
-    return { pid: child.pid };
+    return { pid: child.pid, program: 'claude (under script)' };
   }
-  const script = "$p = Start-Process -FilePath 'claude' -ArgumentList $env:SKYHOP_CLAUDE_ARGS -WorkingDirectory $env:SKYHOP_LAUNCH_DIR -WindowStyle Hidden -PassThru; [Console]::Out.Write($p.Id)";
-  const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+  // Sent encoded, so no quote in it is read differently on the way to PowerShell.
+  const encoded = Buffer.from(HIDDEN_START_SCRIPT, 'utf16le').toString('base64');
+  const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], {
     encoding: 'utf8',
     env: { ...process.env, SKYHOP_CLAUDE_ARGS: ['--cloud', prompt].map(windowsArg).join(' '), SKYHOP_LAUNCH_DIR: dir },
     timeout: 60_000,
   });
-  const pid = Number(String(run.stdout ?? '').trim());
-  if (Number.isInteger(pid) && pid > 0) return { pid };
+  const [id, program] = String(run.stdout ?? '').trim().split('|');
+  const pid = Number(id);
+  if (Number.isInteger(pid) && pid > 0) return { pid, program };
   return { error: String(run.stderr || run.error?.message || 'PowerShell could not start claude').trim().slice(-500) };
 }
 
@@ -241,13 +254,39 @@ export function stopHidden(pid) {
   spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
 }
 
-export async function launchHidden({ dir, prompt, info, pulse, waitMs = hiddenWaitMs(), start = startHidden, stop = stopHidden }) {
-  const { pid, error } = start(dir, prompt);
-  if (!pid) return { status: 'unconfirmed', detail: error };
+// Whether a process still runs. Signal 0 only checks, on Windows too.
+function running(pid) {
   try {
-    const report = await waitForPulse(info, pulse, waitMs, found => Boolean(found.chatId));
-    if (!report) return { status: 'unconfirmed', detail: `The cloud chat did not report back within ${Math.round(waitMs / 60_000)} minutes.` };
-    return { status: 'started', sessionId: report.chatId, url: `https://claude.ai/code/${report.chatId}` };
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+export async function launchHidden({
+  dir, prompt, info, pulse, waitMs = hiddenWaitMs(), start = startHidden, stop = stopHidden, alive = running,
+}) {
+  const { pid, program, error } = start(dir, prompt);
+  if (!pid) return { status: 'unconfirmed', notStarted: true, detail: error };
+  const began = Date.now();
+  let quit = false;
+  const giveUp = () => {
+    quit = !alive(pid);
+    return quit;
+  };
+  try {
+    const report = await waitForPulse(info, pulse, waitMs, found => Boolean(found.chatId), { giveUp });
+    const seconds = Math.round((Date.now() - began) / 1000);
+    if (report) return { status: 'started', sessionId: report.chatId, url: `https://claude.ai/code/${report.chatId}`, program, seconds };
+    return {
+      status: 'unconfirmed',
+      program,
+      seconds,
+      detail: quit
+        ? `${program} stopped after ${seconds} seconds, before the cloud chat reported back.`
+        : `The cloud chat did not report back within ${Math.round(waitMs / 60_000)} minutes. ${program} was still running.`,
+    };
   } finally {
     // The chat runs in the cloud now, so the local window is no longer needed.
     stop(pid);

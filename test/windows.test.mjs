@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { hiddenLaunch, launchHidden, pasteCommand, readPulse, waitForPulse, windowsArg } from '../scripts/cloud.mjs';
+import { HIDDEN_START_SCRIPT, hiddenLaunch, launchHidden, pasteCommand, readPulse, waitForPulse, windowsArg } from '../scripts/cloud.mjs';
+import { forgetHandoff, saveHandoffRecord, readRecord } from '../scripts/back.mjs';
 import { repoInfo } from '../scripts/git.mjs';
 import { redactPaths } from '../scripts/log.mjs';
 import { chatIdHere, pulseMessage, PULSE_READY, PULSE_SETUP, readPulseMessage } from '../scripts/sync.mjs';
@@ -78,12 +79,16 @@ test('a hidden launch starts claude, waits for the chat to report its ID, then e
       return { pid: 4321 };
     },
     stop: pid => calls.push(['stop', pid]),
+    alive: () => true,
   });
-  assert.deepEqual(outcome, { status: 'started', sessionId: 'session_01Reported', url: 'https://claude.ai/code/session_01Reported' });
+  assert.equal(outcome.status, 'started');
+  assert.equal(outcome.sessionId, 'session_01Reported');
+  assert.equal(outcome.url, 'https://claude.ai/code/session_01Reported');
   assert.deepEqual(calls, [['start', repo.root, 'Project x. [skyhop-history]'], ['stop', 4321]]);
 
-  const silent = await launchHidden({ dir: repo.root, prompt: 'x', info, pulse: 'none-pulse', waitMs: 50, start: () => ({ pid: 9 }), stop: pid => calls.push(['stop', pid]) });
+  const silent = await launchHidden({ dir: repo.root, prompt: 'x', info, pulse: 'none-pulse', waitMs: 50, start: () => ({ pid: 9, program: 'C:\\npm\\claude.cmd' }), stop: pid => calls.push(['stop', pid]), alive: () => true });
   assert.equal(silent.status, 'unconfirmed');
+  assert.match(silent.detail, /did not report back.*claude\.cmd was still running/);
   assert.deepEqual(calls.at(-1), ['stop', 9], 'the window is ended even when the chat never reports');
   assert.equal((await launchHidden({ dir: repo.root, prompt: 'x', info, pulse: 'p', start: () => ({ error: 'no PowerShell' }) })).detail, 'no PowerShell');
 });
@@ -105,4 +110,43 @@ test('a brief path starting with ~ is found in the home folder', t => {
   const result = skyhop(['--brief', '~/.skyhop/briefs/brief.md', '--session', SESSION, '--dry-run']);
   assert.equal(result.status, 0, result.output);
   assert.match(result.output, /Dry run/);
+});
+
+test('on Windows the hidden start picks claude.exe or claude.cmd, never npm\'s claude.ps1', () => {
+  assert.match(HIDDEN_START_SCRIPT, /Get-Command claude -CommandType Application/);
+  assert.match(HIDDEN_START_SCRIPT, /\$_\.Extension -in '\.exe', '\.cmd', '\.bat'/);
+  assert.match(HIDDEN_START_SCRIPT, /Start-Process -FilePath \$c\.Source /);
+  assert.doesNotMatch(HIDDEN_START_SCRIPT, /FilePath 'claude'|\.ps1/);
+});
+
+test('a launch that started nothing reports it as such', async t => {
+  const repo = makeRepo(t);
+  const outcome = await launchHidden({ dir: repo.root, prompt: 'x', info: repoInfo(repo.root), pulse: 'p', start: () => ({ error: 'Start-Process failed' }) });
+  assert.deepEqual(outcome, { status: 'unconfirmed', notStarted: true, detail: 'Start-Process failed' });
+});
+
+test('a handoff whose chat never started is forgotten, and a retry clears it and goes ahead', t => {
+  const { home, handOff, skyhop, briefFile, remoteBranches } = setup(t);
+  saveHandoffRecord({ sessionId: 'gone', at: 'x', sync: { runBranch: 'skyhop-run/x' } }, home);
+  forgetHandoff('gone', home);
+  assert.equal(readRecord('gone', home), null);
+
+  const first = skyhop(['--brief', briefFile, '--session', SESSION, '--yes'], { FAKE_CLAUDE_MODE: 'no-link' });
+  assert.equal(first.status, 0, first.output);
+  assert.match(remoteBranches('skyhop-run'), /skyhop-run\//);
+  handOff();
+  assert.equal(remoteBranches('skyhop-run').split('\n').filter(Boolean).length, 1, 'the earlier start branch was removed');
+  assert.ok(readRecord(SESSION, home).cloud, 'the retry started its chat');
+});
+
+test('a hidden launch whose program quits stops waiting at once and says which program it was', async t => {
+  const repo = makeRepo(t);
+  const started = Date.now();
+  const outcome = await launchHidden({
+    dir: repo.root, prompt: 'x', info: repoInfo(repo.root), pulse: 'p', waitMs: 60_000,
+    start: () => ({ pid: 77, program: 'C:\\Windows\\notepad.exe' }), stop: () => {}, alive: () => false,
+  });
+  assert.equal(outcome.status, 'unconfirmed');
+  assert.match(outcome.detail, /notepad\.exe stopped after \d+ seconds, before the cloud chat reported back/);
+  assert.ok(Date.now() - started < 5000, 'it did not wait out the minute');
 });
