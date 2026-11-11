@@ -322,7 +322,7 @@ export const register: Register = on => {
   on('classic.SessionStart', async ($, e, next) => {
     const done = await next(e)
     if (e.source !== 'resume' || !SESSION_ID.test(e.session_id)) return done
-    const home = await $.env.get('HOME')
+    const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
     const note = `${home}/.skyhop/animate/${e.session_id}.json`
     if (!home || !(await $.fs.exists(note))) return done
     const { at } = JSON.parse(await $.fs.read(note)) as { at?: unknown }

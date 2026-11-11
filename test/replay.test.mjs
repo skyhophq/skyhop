@@ -105,11 +105,21 @@ test('a message the user sends in the middle ends the replay, and one without a 
   assert.equal(step('ok fix it'), undefined);
 });
 
-test('a handoff with no readable history says so and goes on with the recap', t => {
-  const { calls, step, said } = vm(t, { history: null });
+test('a handoff whose history cannot be read says so and goes on with the recap', t => {
+  const { root, calls, step, said } = vm(t);
+  fs.writeFileSync(path.join(root, '.skyhop/history.enc'), 'damaged');
   assert.match(said(step(`Setting up.\n${HISTORY_MARK}`)), /could not show your earlier conversation/);
   assert.equal(calls.restart, 0);
   assert.equal(step('the recap'), undefined);
+});
+
+test('a chat set up with no history to show is ready at once, and a late ping is never worked on', t => {
+  const { calls, step, said } = vm(t, { history: null });
+  assert.match(said(step(`Project x. Setting up. [skyhop-key:abc] ${HISTORY_MARK}`)), /this chat is ready/);
+  assert.equal(calls.ready, 1);
+  assert.equal(calls.restart, 0);
+  assert.match(said(step(`Skyhop: show my earlier conversation here. ${READY_PING}`)), /this chat is ready/);
+  assert.equal(step('Skyhop has moved you to a cloud VM.'), undefined, 'the first message goes to the session');
 });
 
 const line = fields => `${JSON.stringify({ sessionId: SESSION, ...fields })}\n`;

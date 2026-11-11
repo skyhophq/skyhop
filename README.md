@@ -22,7 +22,9 @@ If you have to leave mid-task and shut your laptop, the cloud session starts wit
 /plugin install skyhop@skyhop
 ```
 
-Skyhop needs Node.js 20 or later, git, and a claude.ai sign-in on a plan that includes cloud sessions. It's built on macOS. Its full test suite also passes on Linux, but a real handoff from a Linux machine hasn't been run yet. Windows isn't supported.
+Skyhop needs Node.js 20 or later, git, and a claude.ai sign-in on a plan that includes cloud sessions. It's built on macOS. Its full test suite also passes on Linux, but a real handoff from a Linux machine hasn't been run yet.
+
+**On Windows** (from 0.11.0), Skyhop does the default handoff, a full resume synced through GitHub, and brings it home the same way. `--summary` and `--no-sync` stop before anything is sent, because Skyhop can't start those sessions on Windows. Claude Code only starts a new cloud session from a terminal, so Skyhop runs it in a hidden console window for a minute or two, and the cloud chat tells Skyhop its link through GitHub. This path has been tested end to end with a Mac standing in for the hidden window. A real handoff from a Windows PC hasn't been run yet.
 
 ## Usage
 
@@ -199,7 +201,7 @@ claude plugin validate .
 claude --plugin-dir .
 ```
 
-The tests use a stand-in `claude` command and a local bare remote, so they never touch GitHub or the cloud. `claude plugin test .` runs the animation's tests (`test/takeoff.test.tsx`) against Claude Code's plugin engine.
+The tests use a stand-in `claude` command and a local bare remote, so they never touch GitHub or the cloud. The stand-in is a shell script, so the suite runs on macOS and Linux. `test/windows.test.mjs` covers the Windows parts, and `SKYHOP_LAUNCH=hidden` runs a real handoff through the Windows launch path on a Mac, with `script` in place of the hidden window. `claude plugin test .` runs the animation's tests (`test/takeoff.test.tsx`) against Claude Code's plugin engine.
 
 ## License
 

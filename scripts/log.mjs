@@ -13,9 +13,13 @@ export const MAX_LOG_BYTES = 512 * 1024;
 const VALUE_LIMIT = 300;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
+// Hides home folders: this machine's, any macOS or Linux one, and any Windows one in
+// its usual forms, C:\Users\name, C:/Users/name, or JSON's C:\\Users\\name.
 export function redactPaths(text, home = os.homedir()) {
   const withoutHome = home && home !== '/' ? text.replaceAll(home, '~') : text;
-  return withoutHome.replace(/(?:\/Users|\/home)\/[^/\s"'`)]+/g, '~');
+  return withoutHome
+    .replace(/\b[A-Za-z]:(?:\\{1,2}|\/)Users(?:\\{1,2}|\/)[^\\/\s"'`)]+/gi, '~')
+    .replace(/(?:\/Users|\/home)\/[^/\s"'`)]+/g, '~');
 }
 
 export function cleanValue(value, home = os.homedir()) {

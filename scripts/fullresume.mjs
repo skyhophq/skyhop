@@ -121,7 +121,7 @@ export function addRelayCommit(dir, { transcript, sessionId, mode, brief, sync, 
   fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
   fs.writeFileSync(settingsFile, mergeSettings(existing));
 
-  git(dir, ['add', '-f', '.skyhop', '.claude/settings.json']);
+  git(dir, ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', 'add', '-f', '.skyhop', '.claude/settings.json']);
   const name = tryGit(dir, ['config', 'user.name']) || 'Skyhop';
   const email = tryGit(dir, ['config', 'user.email']) || 'skyhop@localhost';
   git(dir, [

@@ -26,6 +26,7 @@ const RESTART_DELAY_SECONDS = 1;
 const SETTING_UP = 'Skyhop is setting up this chat. It restarts once, which takes about a minute, and then shows your earlier conversation.';
 const STILL_SETTING_UP = 'Skyhop is still setting up this chat.';
 const READY = 'Skyhop: this chat is ready.';
+const READY_NO_HISTORY = 'Skyhop: this chat is ready. Your session carries on with the next message.';
 const GAVE_UP = 'Skyhop could not show your earlier conversation in this chat, so a recap follows instead.';
 const NO_WORDS = '(Claude worked on this without writing a reply.)';
 
@@ -139,6 +140,13 @@ export function replayStep({ root, prompt, ready, restart = restartChat, loaded 
   };
 
   if (prompt.includes(HISTORY_MARK)) {
+    // Nothing to show: the Mac only waits to learn the chat is there.
+    if (!fs.existsSync(path.join(root, '.skyhop', HISTORY_NAME))) {
+      const told = ready();
+      cloudLog(root, 'chat set up without history', { 'mac-told': told ? 'yes' : 'no' });
+      save({ state: 'done' });
+      return { output: say(READY_NO_HISTORY) };
+    }
     const history = readHistory(root);
     if (!history) {
       cloudLog(root, 'history could not be read');
@@ -166,6 +174,7 @@ export function replayStep({ root, prompt, ready, restart = restartChat, loaded 
   }
 
   const state = readJson(stateFile(root));
+  if (prompt.includes(READY_PING) && (!state || state.state === 'done')) return { output: say(READY) };
   if (!state || state.state === 'done') return undefined;
   const waitingMessage = RESTART_NOTICE.test(prompt.trim()) || prompt.includes(READY_PING);
   const history = readHistory(root);

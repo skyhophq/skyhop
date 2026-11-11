@@ -11,7 +11,8 @@ import {
 } from './back.mjs';
 import { briefPrompt, loadBrief, reconnectPrompt, redactPaths, resumePrompt } from './brief.mjs';
 import {
-  launchSession, launchTimes, pasteCommand, readHistory, recordHandoff, reopenWaitMs, requireSignIn, sendToChat, waitForBranch,
+  hiddenLaunch, launchHidden, launchSession, launchTimes, pasteCommand, readHistory, recordHandoff, reopenWaitMs, requireSignIn,
+  runClaude, sendToChat, waitForBranch, waitForPulse,
 } from './cloud.mjs';
 import { addRelayCommit, findTranscript, LARGE_TRANSCRIPT_BYTES, measureUpload } from './fullresume.mjs';
 import { MAX_MEMORY_BYTES, memoryDir, memoryEnabled, memoryHashes, readMemory } from './memory.mjs';
@@ -24,7 +25,7 @@ import {
 import { findLeftovers, formatLeftovers, removeLeftovers } from './leftovers.mjs';
 import { log, logDir, privateFile, privateHome, skyhopVersion } from './log.mjs';
 import { formatFinding, isSensitivePath, scanDiff, scanText } from './secrets.mjs';
-import { newKey, pulseRef } from './sync.mjs';
+import { newKey, PULSE_READY, pulseRef } from './sync.mjs';
 
 const MODES = ['auto', 'acceptEdits', 'plan'];
 const EXIT_NEEDS_CONFIRMATION = 2;
@@ -67,6 +68,8 @@ function readOptions(args) {
   } catch (error) {
     throw new SkyhopError(error.message, 'Flags are --summary, --name, --dry-run, --yes, --mode, --history, --no-sync, --new-chat and --allow-secrets.');
   }
+  // The skill passes ~/.skyhop/briefs/..., which not every shell expands.
+  if (/^~[\\/]/.test(parsed.brief ?? '')) parsed.brief = path.join(os.homedir(), parsed.brief.slice(2));
   parsed.historyCount = /^(off|none|no)$/i.test(parsed.history) ? 0 : Number(parsed.history);
   if (!Number.isInteger(parsed.historyCount) || parsed.historyCount < 0 || parsed.historyCount > MAX_HISTORY) {
     throw new SkyhopError(`Unknown --history value: ${parsed.history}`, `Use a number of exchanges from 0 to ${MAX_HISTORY}, or off.`);
@@ -211,7 +214,9 @@ function reportLaunch({ outcome, command, record, synced }) {
     return EXIT_NEEDS_TERMINAL;
   }
   recordHandoff({ ...record, status: 'unconfirmed' });
-  console.log(`\nThe launch finished without showing a session link. Check https://claude.ai/code for a new session on ${record.branch}.\nIf there is none, run this in your own terminal:\n\n${command}`);
+  console.log(command
+    ? `\nThe launch finished without showing a session link. Check https://claude.ai/code for a new session on ${record.branch}.\nIf there is none, run this in your own terminal:\n\n${command}`
+    : `\nSkyhop could not confirm that the cloud chat started. Check https://claude.ai/code for a new session on ${record.branch}.\nIf there is none, and Claude Code has never opened this repository, open claude in it once and answer the trust question, then run /skyhop again.`);
   if (outcome.detail) console.log(`\nLast output:\n${outcome.detail}`);
   return 0;
 }
@@ -243,8 +248,11 @@ function historyIntro(count, again) {
     : `Skyhop: this chat now continues your session from your computer. Your last ${count} exchange${count === 1 ? '' : 's'} there follow${count === 1 ? 's' : ''}, word for word, without tool steps.`;
 }
 
-function setupMessage(project) {
-  return `Project ${project}. Skyhop is moving this session to the cloud and setting up this chat. Your earlier conversation will appear here shortly.`;
+// The chat's first message when Skyhop sends the real one later. On Windows it is
+// also a command-line argument, so it stays one line of plain characters.
+function setupMessage(project, { history = true } = {}) {
+  const name = project.replace(/[^A-Za-z0-9 ._-]+/g, '-');
+  return `Project ${name}. Skyhop is moving this session to the cloud and setting up this chat.${history ? ' Your earlier conversation will appear here shortly.' : ''}`;
 }
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -253,14 +261,18 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // old message of the user's is posted, and the chat's Skyhop plugin answers it with
 // Claude's old reply. Then the chat gets the message that starts the work. If the
 // chat never gets ready, it gets the recap it would have had without this.
+// With no history, it only waits for the chat to be ready and sends the first message.
 async function showHistory({ info, sessionId, history, pulse, finalMessage, fallbackMessage }) {
-  const total = history.exchanges.length;
-  console.log(`\nSetting up the cloud chat to show ${total} exchange(s) of your conversation. Keep this computer awake until Skyhop says it is done.`);
+  const total = history?.exchanges.length ?? 0;
+  console.log(total > 0
+    ? `\nSetting up the cloud chat to show ${total} exchange(s) of your conversation. Keep this computer awake until Skyhop says it is done.`
+    : '\nSetting up the cloud chat. Keep this computer awake until Skyhop says it is done.');
   // A chat that already has the plugin is ready at once. A new one restarts first.
-  let ready = await waitForBranch(info, pulse, historyPingMs());
+  const isReady = found => found.note === PULSE_READY;
+  let ready = await waitForPulse(info, pulse, historyPingMs(), isReady);
   if (!ready) {
     sendToChat(sessionId, `Skyhop: show my earlier conversation here. ${READY_PING}`);
-    ready = await waitForBranch(info, pulse, historyWaitMs());
+    ready = await waitForPulse(info, pulse, historyWaitMs(), isReady);
   }
   if (!ready) {
     log('handoff', 'history: the chat did not get ready');
@@ -268,6 +280,12 @@ async function showHistory({ info, sessionId, history, pulse, finalMessage, fall
     console.log(sent.ok
       ? 'The chat did not get ready to show your conversation, so it starts with a recap instead.'
       : `The chat did not get ready, and the recap could not be sent either (${sent.error}). Open the chat and send it a message to carry on.`);
+    return;
+  }
+  if (total === 0) {
+    const sent = sendToChat(sessionId, fallbackMessage);
+    log('handoff', 'first message sent', { result: sent.ok ? 'sent' : sent.error });
+    console.log(sent.ok ? 'The cloud chat is set up.' : `The message that starts the work could not be sent (${sent.error}). Open the chat and send it a message to carry on.`);
     return;
   }
   let shown = 0;
@@ -294,7 +312,7 @@ async function showHistory({ info, sessionId, history, pulse, finalMessage, fall
 }
 
 function claudeVersion() {
-  const run = spawnSync('claude', ['--version'], { encoding: 'utf8', timeout: 5000 });
+  const run = runClaude(['--version'], { encoding: 'utf8', timeout: 5000 });
   return String(run.stdout ?? '').trim().split(' ')[0] || null;
 }
 
@@ -330,6 +348,12 @@ async function handoff(options) {
   // A session that came home goes back to the chat it used last time, if that
   // chat's relay can switch to a new handoff.
   const reuse = !options['new-chat'] && earlier?.cloud?.reopen ? earlier.cloud : null;
+  if (hiddenLaunch() && !useSync) {
+    throw new SkyhopError(
+      'On Windows, Skyhop can start the cloud session only for a full resume synced through GitHub, so nothing was changed.',
+      fullResume ? 'Use a repository with a GitHub remote, and leave out --no-sync.' : 'Run /skyhop without --summary.',
+    );
+  }
   const remote = fullResume ? remoteControlEntry(transcript.path) : null;
   const memory = fullResume ? handoffMemory(transcript.path, info.root) : null;
   const notes = memory && !memory.tooBig ? memory.files : null;
@@ -470,26 +494,34 @@ async function handoff(options) {
   try {
     // The chat that replays the conversation starts with a short setup message, and
     // gets the real first message once the old ones are in.
-    const opening = history ? `${setupMessage(project)}\n\n[skyhop-key:${key}]\n${HISTORY_MARK}` : firstMessage;
-    const outcome = await launchSession({ dir, prompt: opening, env, ...launchTimes(fullResume && !useSync ? transcript.compressed + repoSize : 0) });
+    // On Windows the chat always starts that way, from a hidden console that can't
+    // show the session link, and the first message goes after it.
+    const hidden = hiddenLaunch();
+    const opening = hidden
+      ? `${setupMessage(project, { history: Boolean(history) })} [skyhop-key:${key}] ${HISTORY_MARK}`
+      : history ? `${setupMessage(project)}\n\n[skyhop-key:${key}]\n${HISTORY_MARK}` : firstMessage;
+    const outcome = hidden
+      ? await launchHidden({ dir, prompt: opening, info, pulse: pulseRef(handoffRecord.sync.chatRef) })
+      : await launchSession({ dir, prompt: opening, env, ...launchTimes(fullResume && !useSync ? transcript.compressed + repoSize : 0) });
     if (outcome.status !== 'needs-terminal') removeLaunchFolder(info);
     if (useSync && outcome.status === 'started') {
       saveHandoffRecord({ ...handoffRecord, cloud: { sessionId: outcome.sessionId, url: outcome.url, runBranch: startBranch, key, reopen: true } });
-      if (history) {
+      if (history || hidden) {
         console.log(`\nCloud chat: ${outcome.url}`);
         await showHistory({
           info, sessionId: outcome.sessionId, history, pulse: pulseRef(handoffRecord.sync.chatRef),
           finalMessage: resumePrompt(project, brief, remote, ''), fallbackMessage: prompt,
         });
       }
-    } else if (history && outcome.status === 'unconfirmed') {
+    } else if ((history || hidden) && outcome.status === 'unconfirmed') {
       console.log('\nSkyhop could not tell whether the chat started, so it could not show your earlier conversation there. If the chat exists, open it and send any message to carry on.');
     }
     return reportLaunch({ outcome, command, record, synced: useSync });
   } catch (error) {
     if (error instanceof SkyhopError) {
       recordHandoff({ ...record, status: `failed: ${error.message}` });
-      error.hint = `${error.hint ?? ''}\nThe brief is kept at ${options.brief}. To retry, run this in your own terminal:\n\n${command}`.trim();
+      const retry = command ? `To retry, run this in your own terminal:\n\n${command}` : 'To retry, run /skyhop again.';
+      error.hint = `${error.hint ?? ''}\nThe brief is kept at ${options.brief}. ${retry}`.trim();
     }
     throw error;
   }

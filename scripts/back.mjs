@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { redactPaths } from './brief.mjs';
-import { readHistory } from './cloud.mjs';
+import { readHistory, runClaude } from './cloud.mjs';
 import { findTranscript } from './fullresume.mjs';
 import { createSnapshot, git, repoInfo, skyhopBranch, SkyhopError, tryGit } from './git.mjs';
 import { log, logDir, privateFile, shortId } from './log.mjs';
@@ -401,7 +401,7 @@ function dropDownloads(info) {
 }
 
 function isSessionRunning(sessionId) {
-  const run = spawnSync('claude', ['agents', '--json'], { encoding: 'utf8' });
+  const run = runClaude(['agents', '--json'], { encoding: 'utf8' });
   try {
     return JSON.parse(run.stdout).some(agent => agent.sessionId === sessionId);
   } catch {

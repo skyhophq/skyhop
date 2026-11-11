@@ -53,7 +53,8 @@ if [ "$1" = "--cloud" ]; then
   # Stands in for the chat's relay saying it is ready to show the earlier conversation.
   if [ -n "$FAKE_CLAUDE_READY" ]; then
     tail=$(git rev-parse --abbrev-ref HEAD | sed 's#^skyhop-run/##')
-    git push -q origin "HEAD:refs/heads/skyhop-sync/$tail-pulse" 2>/dev/null
+    ready=$(git commit-tree "HEAD^{tree}" -p HEAD -m "Skyhop: ready for the earlier conversation" -m "chat: session_01FakeSessionForTests")
+    git push -q origin "$ready:refs/heads/skyhop-sync/$tail-pulse" 2>/dev/null
   fi
   printf '%s' "${CCR_FORCE_BUNDLE:-unset}" > "$FAKE_CLAUDE_DIR/force-bundle"
   git show HEAD:tracked.txt > "$FAKE_CLAUDE_DIR/launch-tracked" 2>/dev/null

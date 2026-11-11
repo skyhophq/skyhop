@@ -231,7 +231,29 @@ function readPulse(skyhop) {
 // through. The save then builds on that commit and moves both branches to the same
 // place. Both only ever move forward, so nothing in the VM deletes a branch.
 // Returns the commit, or null if it couldn't be pushed.
-export function markBusy(root, open) {
+// What a pulse commit says. The Mac reads it: on Windows it learns the chat's ID
+// from the first one, and a chat replaying the earlier conversation says when it
+// is ready for the messages.
+export const PULSE_SETUP = 'Skyhop: setting up the chat';
+export const PULSE_READY = 'Skyhop: ready for the earlier conversation';
+const PULSE_BUSY = 'Skyhop: a reply is running';
+
+// The cloud names its chats cse_X inside the VM and session_X in links.
+export function chatIdHere(env = process.env) {
+  const id = String(env.CLAUDE_CODE_REMOTE_SESSION_ID ?? '');
+  return /^(?:cse|session)_[A-Za-z0-9]+$/.test(id) ? id.replace(/^cse_/, 'session_') : null;
+}
+
+export function pulseMessage(note = PULSE_BUSY, chatId = chatIdHere()) {
+  return chatId ? `${note}\n\nchat: ${chatId}` : note;
+}
+
+export function readPulseMessage(message) {
+  const text = String(message ?? '');
+  return { note: text.split('\n')[0].trim(), chatId: text.match(/^chat: (session_[A-Za-z0-9]+)$/m)?.[1] ?? null };
+}
+
+export function markBusy(root, open, note = PULSE_BUSY) {
   const skyhop = path.join(root, '.skyhop');
   try {
     const state = readJson(path.join(skyhop, 'sync-state.json'));
@@ -239,7 +261,7 @@ export function markBusy(root, open) {
     const tree = parent
       ? must(git(root, ['rev-parse', `${parent}^{tree}`]), 'rev-parse')
       : must(git(root, ['mktree'], { input: '' }), 'mktree');
-    const sha = must(git(root, ['commit-tree', tree, ...(parent ? ['-p', parent] : []), '-m', 'Skyhop: a reply is running'], { env: AUTHOR }), 'commit-tree');
+    const sha = must(git(root, ['commit-tree', tree, ...(parent ? ['-p', parent] : []), '-m', pulseMessage(note)], { env: AUTHOR }), 'commit-tree');
     const run = git(root, ['push', '-q', open.target, `${sha}:refs/heads/${pulseRef(open.config.chatRef)}`], { timeout: CHECK_TIMEOUT_MS });
     if (run.status !== 0) return null;
     fs.writeFileSync(path.join(skyhop, 'pulse'), sha);

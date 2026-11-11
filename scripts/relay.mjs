@@ -15,7 +15,7 @@ import { MAX_MEMORY_BYTES, memoryPrompt, packMemory, placeMemory, readMemory, un
 import { HISTORY_MARK, leaveToModel, pluginLoaded, replayStep, showInChat, waitInChat } from './replay.mjs';
 import { isSensitivePath, scanDiff, scanText, SENSITIVE_EXCLUDES } from './secrets.mjs';
 import {
-  cloudState, KEY_PATTERN, markBusy, openMemory, openTranscript, readKey, readSavedMemory, restoreProgress, saveProgress,
+  cloudState, KEY_PATTERN, markBusy, PULSE_READY, PULSE_SETUP, openMemory, openTranscript, readKey, readSavedMemory, restoreProgress, saveProgress,
 } from './sync.mjs';
 
 export const RELAY_COMMIT_MARKER = 'skyhop-relay-commit';
@@ -845,6 +845,9 @@ export function handlePrompt({
   if (rawPrompt.includes(HISTORY_MARK)) {
     storeKey(root, rawPrompt, chatTranscript);
     scrubRelayCommit(root);
+    // Tells the Mac this chat exists, and its ID, which it can't read on Windows.
+    const state = github.check(root);
+    if (state.state === 'open') github.busy(root, state, PULSE_SETUP);
   }
   const replayed = replay({
     root,
@@ -852,7 +855,7 @@ export function handlePrompt({
     // The busy mark doubles as the sign that the chat is ready for the old messages.
     ready: () => {
       const state = github.check(root);
-      return state.state === 'open' && Boolean(github.busy(root, state));
+      return state.state === 'open' && Boolean(github.busy(root, state, PULSE_READY));
     },
   });
   if (replayed) return replayed.output;
