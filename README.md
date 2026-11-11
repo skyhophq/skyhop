@@ -96,7 +96,7 @@ Skyhop pushes your code and the session's transcript to a `skyhop-run/...` branc
 - **In a chat that fell back to a recap, replies are generated twice**, once by the resumed session and once by the chat Claude repeating them. The chat Claude runs on Haiku to keep this cheap, and it could change the wording slightly. Each wait is also a small Haiku call, so a long message uses a little more.
 - **The mode picker in the chat has no effect.** Send `skyhop mode auto`, `skyhop mode acceptEdits` or `skyhop mode plan` as a message instead. It applies from the next message.
 - **The resumed session can't ask you for approval.** If it needs a tool its mode doesn't allow, the reply says what was blocked and how to allow it.
-- **One message can run for up to six hours.** A single 36-minute message has been tested through Skyhop. Before version 0.6.0, a message stopped at about 25 minutes, because the cloud stops a machine whose reply shows no activity for that long. The wait commands are that activity.
+- **One message can run for up to six hours.** A single message of an hour has been tested through Skyhop: twelve 5-minute steps, one after another. Before version 0.6.0, a message stopped at about 25 minutes, because the cloud stops a machine whose reply shows no activity for that long. The wait commands are that activity.
 - **Send one message at a time.** A message sent while a reply is running isn't passed on, and the reply tells you to send it again.
 - **To stop a long reply,** press stop in the chat, then send `skyhop stop`. The session's work so far is kept and saved.
 - **To see what Skyhop did in the cloud,** send `skyhop log`. The chat shows the last 40 lines of the cloud machine's Skyhop log, without passing anything to the session.
@@ -190,7 +190,7 @@ The logs hold steps, outcomes, errors and Skyhop's own messages, never your conv
 - If the Claude GitHub App isn't installed on your repository, `--cloud` uploads it directly instead of cloning, and that session can't push. Full resume still works, but each reply warns that nothing is being saved for your machine.
 - The desktop app groups cloud sessions by their GitHub repo, so a handoff from a repo you have open in the app appears under that project. A session uploaded directly has no repo link and appears under **Cloud**. That happens with `--no-sync`, with no remote, or when the Claude GitHub App isn't set up on the repo.
 - If Skyhop can't take its commit out of git history in the VM, it warns you in the chat. Don't push that branch.
-- Going back to a chat has been tested while its cloud machine was still running, two hours after the last message. Going back after the machine has been shut down for being idle is untested. Skyhop then relies on the new machine starting from the chat's branch.
+- Going back to a chat has been tested two hours and 38 hours after its last message. Both times the chat picked up the handoff within half a minute. Longer gaps are untested. If a chat can't be reached, `/skyhop --new-chat` starts a fresh one.
 
 ## Development
 
@@ -202,6 +202,8 @@ claude --plugin-dir .
 ```
 
 The tests use a stand-in `claude` command and a local bare remote, so they never touch GitHub or the cloud. The stand-in is a shell script, so the suite runs on macOS and Linux. `test/windows.test.mjs` covers the Windows parts, and `SKYHOP_LAUNCH=hidden` runs a real handoff through the Windows launch path on a Mac, with `script` in place of the hidden window. `claude plugin test .` runs the animation's tests (`test/takeoff.test.tsx`) against Claude Code's plugin engine.
+
+`node test/live.mjs` is the release check against the real cloud, run after each Claude Code release and before each Skyhop release. It makes a throwaway Haiku session, hands it off, asks the chat for a codeword from the session's first message, brings it home, and removes its branches. Flags: `--again` adds a second trip to the same chat, `--exchanges 50` replays 50 exchanges, `--job 60` keeps one message busy for an hour, and `--windows-path` starts the chat the way Windows does. It runs on Windows too. Run it from a clone of a GitHub repository that has the Claude GitHub App and that Claude Code already trusts, and archive the chats it lists at the end.
 
 ## License
 
