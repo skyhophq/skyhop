@@ -85,9 +85,16 @@ function signedIn() {
 }
 
 // The prompt goes through stdin, because on Windows the command line passes through cmd.exe.
+// A call that hangs is stopped after a few minutes, with what it printed.
+const CLAUDE_CALL_MS = 3 * 60_000;
 function claudeSays(sessionId, prompt, first = false) {
   const args = ['-p', '--model', 'haiku', first ? '--session-id' : '--resume', sessionId];
-  return runClaude(args, { cwd: root, input: prompt, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).status === 0;
+  const begun = Date.now();
+  const result = runClaude(args, { cwd: root, input: prompt, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: CLAUDE_CALL_MS });
+  if (result.status === 0) return true;
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim().split('\n').slice(-8).join('\n');
+  say(`claude ${args.slice(0, 4).join(' ')} ${result.error?.code === 'ETIMEDOUT' ? 'was still running' : `stopped with ${result.status ?? result.signal ?? result.error?.code}`} after ${Math.round((Date.now() - begun) / 1000)}s.${output ? ` Its output:\n${output}` : ' It printed nothing.'}`);
+  return false;
 }
 
 const recordFile = sessionId => path.join(HOME, '.skyhop', 'sessions', `${sessionId}.json`);

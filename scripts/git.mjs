@@ -160,12 +160,34 @@ export function launchDir(root, home = os.homedir()) {
   return path.join(home, '.skyhop', 'launch', `${name}-${id}`);
 }
 
+// git prints worktree paths with forward slashes, on Windows too, where Node's paths
+// have backslashes and the drive letter's case can differ.
+export function sameWorktreePath(a, b) {
+  const plain = value => {
+    const slashed = String(value).replace(/\\/g, '/').replace(/\/+$/, '');
+    return /^[A-Za-z]:\//.test(slashed) ? slashed.toLowerCase() : slashed;
+  };
+  return plain(a) === plain(b);
+}
+
 function launchBranch(root, dir) {
   const real = fs.existsSync(dir) ? fs.realpathSync(dir) : dir;
   const entry = runGit(root, ['worktree', 'list', '--porcelain']).stdout
     .split('\n\n')
-    .find(block => block.startsWith(`worktree ${real}\n`));
+    .find(block => sameWorktreePath(block.match(/^worktree (.+)$/m)?.[1] ?? '', real));
   return entry?.match(/^branch (refs\/heads\/skyhop(?:-run)?\/.+)$/m)?.[1] ?? null;
+}
+
+// A relay branch only ever lives in the launch folder, so one that no worktree has
+// checked out was left behind. Skyhop 0.11.3 and earlier left them on Windows, and a
+// trip back to the same chat reuses the name, which git then refused.
+function strayRelayBranches(root) {
+  return runGit(root, ['for-each-ref', '--format=%(refname)%00%(worktreepath)', 'refs/heads/skyhop-run/']).stdout
+    .split('\n')
+    .filter(Boolean)
+    .map(line => line.split('\0'))
+    .filter(([, worktree]) => !worktree)
+    .map(([ref]) => ref);
 }
 
 export function removeLaunchFolder(info) {
@@ -175,6 +197,7 @@ export function removeLaunchFolder(info) {
   fs.rmSync(dir, { recursive: true, force: true });
   git(info.root, ['worktree', 'prune']);
   if (branch) tryGit(info.root, ['update-ref', '-d', branch]);
+  for (const ref of strayRelayBranches(info.root)) tryGit(info.root, ['update-ref', '-d', ref]);
 }
 
 // --cloud uses the current branch, so it runs from a linked worktree on the

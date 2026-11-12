@@ -4,7 +4,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import {
   createSnapshot, launchDir, maskUrl, pendingCommitCount, pendingDiff, prepareLaunchFolder,
-  pushBranch, removeLaunchFolder, repoInfo, skyhopBranch,
+  pushBranch, removeLaunchFolder, repoInfo, sameWorktreePath, skyhopBranch,
 } from '../scripts/git.mjs';
 import { isSensitivePath } from '../scripts/secrets.mjs';
 import { dirty, fingerprint, makeRepo, run, tempDir, write } from './helpers.mjs';
@@ -168,6 +168,36 @@ test('a leftover launch folder does not block the next handoff', t => {
   const dir = prepareLaunchFolder(info, info.head, 'skyhop/two');
   assert.equal(run(dir, 'symbolic-ref', '--short', 'HEAD'), 'skyhop/two');
   assert.equal(run(root, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/skyhop'), 'skyhop/two');
+});
+
+test('worktree paths match the way git prints them on Windows', () => {
+  assert.ok(sameWorktreePath('C:/Users/me/.skyhop/launch/kryptos-1a2b', 'C:\\Users\\me\\.skyhop\\launch\\kryptos-1a2b'));
+  assert.ok(sameWorktreePath('c:/Users/me/.skyhop/launch/x', 'C:\\Users\\me\\.skyhop\\launch\\x\\'));
+  assert.ok(sameWorktreePath('/Users/me/.skyhop/launch/x', '/Users/me/.skyhop/launch/x/'));
+  assert.ok(!sameWorktreePath('/Users/me/.skyhop/launch/X', '/Users/me/.skyhop/launch/x'));
+  assert.ok(!sameWorktreePath('C:/Users/me/.skyhop/launch/x', 'C:\\Users\\me\\.skyhop\\launch\\y'));
+});
+
+test('a relay branch left behind by an earlier trip does not block going back to the same chat', t => {
+  const { root, base } = makeRepo(t);
+  process.env.HOME = base;
+  const info = repoInfo(root);
+  run(root, 'branch', 'skyhop-run/main-20261112-121059');
+  const dir = prepareLaunchFolder(info, info.head, 'skyhop-run/main-20261112-121059');
+  assert.equal(run(dir, 'symbolic-ref', '--short', 'HEAD'), 'skyhop-run/main-20261112-121059');
+});
+
+test('removing the launch folder clears stray relay branches and nothing else', t => {
+  const { root, base } = makeRepo(t);
+  process.env.HOME = base;
+  const info = repoInfo(root);
+  run(root, 'branch', 'skyhop-run/old-trip');
+  run(root, 'branch', 'skyhop/kept-summary');
+  run(root, 'branch', 'my-work');
+  removeLaunchFolder(info);
+  assert.equal(run(root, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/skyhop-run'), '');
+  assert.equal(run(root, 'rev-parse', '--verify', 'skyhop/kept-summary'), info.head);
+  assert.equal(run(root, 'rev-parse', '--verify', 'my-work'), info.head);
 });
 
 test('pending changes cover every local branch', t => {
