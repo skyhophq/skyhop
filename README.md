@@ -2,6 +2,8 @@
 
 Skyhop is a Claude Code plugin that hands off a running terminal session to a cloud session. Run `/skyhop`, close your laptop, and carry on from [claude.ai/code](https://claude.ai/code) or the Claude app.
 
+> **Public beta.** Skyhop works end to end on macOS and Windows, and every release passes a real round trip through the cloud first. It does rely on Claude Code behaviour that isn't documented and can change with an update. If something goes wrong, please [open an issue](https://github.com/skyhophq/skyhop/issues) as described in [Reporting a problem](#reporting-a-problem). Skyhop is an independent plugin, not made by Anthropic.
+
 ## The problem
 
 Claude Code has no terminal command that pushes a running session up to the cloud:
@@ -22,9 +24,9 @@ If you have to leave mid-task and shut your laptop, the cloud session starts wit
 /plugin install skyhop@skyhop
 ```
 
-Skyhop needs Node.js 20 or later, git, and a claude.ai sign-in on a plan that includes cloud sessions. It's built on macOS. Its full test suite also passes on Linux, but a real handoff from a Linux machine hasn't been run yet.
+Skyhop needs Node.js 20 or later, git, and a claude.ai sign-in on a plan that includes cloud sessions. It works on macOS and Windows. Its test suite also passes on Linux, but a real handoff from a Linux machine hasn't been run yet.
 
-**On Windows** (from 0.11.0), Skyhop does the default handoff, a full resume synced through GitHub, and brings it home the same way. `--summary` and `--no-sync` stop before anything is sent, because Skyhop can't start those sessions on Windows. Claude Code only starts a new cloud session from a terminal, so Skyhop runs it in a hidden console window for a minute or two, and the cloud chat tells Skyhop its link through GitHub. This path has been tested end to end with a Mac standing in for the hidden window. A real handoff from a Windows PC hasn't been run yet.
+**On Windows** (from 0.11.0), Skyhop does the default handoff, a full resume synced through GitHub, and brings it home the same way. `--summary` and `--no-sync` stop before anything is sent, because Skyhop can't start those sessions on Windows. Claude Code only starts a new cloud session from a terminal, so Skyhop runs it in a hidden console window for a minute or two, and the cloud chat tells Skyhop its link through GitHub. Handoffs from a Windows PC have been tested end to end, including going back to the same cloud chat. To install or update on Windows, run the `claude plugin ...` form of the commands in PowerShell, because `/plugin` opens a menu there.
 
 ## Usage
 
