@@ -18,7 +18,7 @@ If you have to leave mid-task and shut your laptop, the cloud session starts wit
 ## Install
 
 ```text
-/plugin marketplace add arya232006/skyhop
+/plugin marketplace add skyhophq/skyhop
 /plugin install skyhop@skyhop
 ```
 
